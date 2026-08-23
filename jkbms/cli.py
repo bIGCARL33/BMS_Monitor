@@ -24,6 +24,7 @@ from typing import Iterator, Sequence
 
 from .csvlog import CsvLogger
 from .decode import decode
+from .deviceinfo import decode_device_info
 from .discover import discover
 from .frames import Frame
 from .profiles import PROFILES, candidate_profiles, get_profile
@@ -151,6 +152,37 @@ def cmd_loopback(args: argparse.Namespace) -> int:
         print(f"  got  {echo.hex(' ')}")
         print("Garbled echo usually means a baud or voltage-level problem.")
     return 1
+
+
+def cmd_deviceinfo(args: argparse.Namespace) -> int:
+    """Print the board's identity, firmware, and whether UART can work.
+
+    Worth running first on any new board: the hardware-version string decides
+    whether the wired path is even possible, which otherwise costs an evening
+    of wiring checks to discover.
+    """
+    if args.replay:
+        from .frames import FrameAssembler
+        frames = [f for f in FrameAssembler().feed(load_capture(args.replay))
+                  if f.type_byte == 0x03]
+        if not frames:
+            print("no device-info frame in that capture. Record a fresh one -- "
+                  "the board sends it on connect.", file=sys.stderr)
+            return 1
+    else:
+        transport = _open_transport(args)
+        frames = []
+        with transport:
+            for frame in transport.frames(timeout_s=args.timeout):
+                if frame.type_byte == 0x03:
+                    frames.append(frame)
+                    break
+        if not frames:
+            print("no device-info frame arrived", file=sys.stderr)
+            return 1
+
+    print(decode_device_info(frames[-1]).report())
+    return 0
 
 
 def cmd_ports(args: argparse.Namespace) -> int:
@@ -414,6 +446,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ports", help="list serial ports")
     p.set_defaults(func=cmd_ports)
+
+    p = sub.add_parser("deviceinfo",
+                       help="print board model, firmware, and UART capability")
+    _add_link_args(p)
+    p.add_argument("--timeout", type=float, default=20.0, help="seconds to wait")
+    p.set_defaults(func=cmd_deviceinfo)
 
     p = sub.add_parser("loopback",
                        help="prove the adapter works, with the BMS disconnected")

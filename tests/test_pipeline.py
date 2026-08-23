@@ -263,3 +263,22 @@ def test_scan_announces_a_real_jk_match():
         assert "none is confirmed" not in out
     finally:
         ble.scan = original
+
+
+def test_hex_capture_with_a_comment_header_still_loads(tmp_path):
+    """Captures worth keeping get annotated; annotation must not break replay."""
+    raw = capture_bytes(1)
+    path = tmp_path / "annotated.hex"
+    path.write_text(
+        "# JK-BD4A8S4P firmware 15.41, captured over BLE\n"
+        "# 4S pack at rest\n"
+        + " ".join(f"{b:02X}" for b in raw) + "\n")
+    assert load_capture(path) == raw
+
+
+def test_binary_capture_is_not_mistaken_for_hex(tmp_path):
+    """Real binary must survive the hex heuristic untouched."""
+    raw = capture_bytes(1)
+    path = tmp_path / "cap.bin"
+    path.write_bytes(raw)
+    assert load_capture(path) == raw

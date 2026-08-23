@@ -30,14 +30,30 @@ def load_capture(path: str | Path) -> bytes:
         raise TransportError(
             f"{target} is empty -- the sniff captured no bytes, so there is "
             "nothing to replay")
-    # A hex capture only ever contains hex digits and whitespace/punctuation.
-    sample = data[:4096]
-    if sample and all(c in b"0123456789abcdefABCDEF \t\r\n:,-" for c in sample):
-        text = data.decode("ascii", "ignore")
-        for sep in (":", ",", "-"):
-            text = text.replace(sep, " ")
-        return bytes.fromhex("".join(text.split()))
-    return data
+    return _parse_hex(data) or data
+
+
+def _parse_hex(data: bytes) -> bytes | None:
+    """Interpret ``data`` as a hex-text capture, or None if it is binary.
+
+    Captures worth keeping usually acquire a comment header saying what board
+    and firmware they came from -- a capture nobody can identify later is worth
+    much less -- so ``#`` lines are stripped before the hex is parsed.
+    """
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+    body = " ".join(line.split("#", 1)[0] for line in text.splitlines())
+    for separator in (":", ",", "-"):
+        body = body.replace(separator, " ")
+    digits = "".join(body.split())
+    if not digits or len(digits) % 2:
+        return None
+    if any(c not in "0123456789abcdefABCDEF" for c in digits):
+        return None
+    return bytes.fromhex(digits)
 
 
 class ReplayTransport(Transport):
