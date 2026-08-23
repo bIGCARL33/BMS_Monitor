@@ -41,6 +41,22 @@ source .venv/bin/activate
 pip install -e ".[all]"      # or ".[serial]" / ".[ble]" for just one path
 ```
 
+### No venv? No problem
+
+`python3 -m venv` fails on Debian/Ubuntu unless `python3-venv` is installed. You
+do not need it: the core package has **no dependencies at all**, and only the
+serial transport needs pyserial. From the project root:
+
+```bash
+sudo apt install -y python3-serial
+python3 -m jkbms.cli ports
+```
+
+`python3 -m jkbms.cli` is the same program as the `jkbms` command. Everything in
+this README works either way.
+
+### Serial permissions
+
 On Linux you also need permission to open the port:
 
 ```bash
