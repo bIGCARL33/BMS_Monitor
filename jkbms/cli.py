@@ -49,7 +49,7 @@ def _open_transport(args: argparse.Namespace) -> Transport:
         from .transports.serial_link import SerialTransport
         return SerialTransport(
             args.port, baud=args.baud, device_address=args.address,
-            poll_interval_s=args.interval)
+            poll_interval_s=args.interval, legacy=getattr(args, "legacy", False))
     if getattr(args, "ble", None):
         from .transports.ble_link import BleTransport
         return BleTransport(args.ble, poll_interval_s=args.interval)
@@ -96,6 +96,63 @@ def _collect(transport: Transport, *, count: int, timeout_s: float) -> list[Fram
 
 
 # ---------------------------------------------------------------- commands
+def cmd_loopback(args: argparse.Namespace) -> int:
+    """Prove the adapter itself works, with the BMS out of the picture.
+
+    A silent link has two possible causes and they need opposite responses:
+    the adapter/driver/permissions are broken, or they are fine and the BMS
+    simply is not answering. Jumpering the adapter's own TX to its own RX
+    separates them in ten seconds, which beats re-checking wiring against a
+    board that was never going to reply.
+    """
+    try:
+        import serial  # type: ignore[import-untyped]
+    except ImportError:
+        print("pyserial is not installed.", file=sys.stderr)
+        return 2
+
+    print(f"Loopback test on {args.port} at {args.baud} baud.")
+    print("Jumper the adapter's TX pin directly to its own RX pin.")
+    print("Disconnect it from the BMS first -- this tests the adapter alone.\n")
+    if not args.yes:
+        try:
+            input("Press Enter when the jumper is in place (Ctrl-C to abort)... ")
+        except (KeyboardInterrupt, EOFError):
+            print("\naborted")
+            return 1
+
+    probe = b"JKBMS-LOOPBACK-" + bytes(range(16))
+    try:
+        with serial.Serial(args.port, args.baud, timeout=1.0) as link:
+            link.reset_input_buffer()
+            link.write(probe)
+            link.flush()
+            echo = link.read(len(probe))
+    except Exception as exc:
+        print(f"error: cannot open {args.port}: {exc}", file=sys.stderr)
+        return 2
+
+    if echo == probe:
+        print(f"PASS -- {len(echo)} bytes echoed intact.")
+        print("The adapter, its driver and your permissions all work.")
+        print("So a silent link is the BMS not answering, not your USB side.")
+        print("Next: check TX/RX crossing at the JST, then the board's protocol"
+              " setting,\nor switch to BLE, which needs no board-side config.")
+        return 0
+
+    if not echo:
+        print("FAIL -- nothing came back.")
+        print("With TX jumpered to RX the adapter must hear itself, so this is")
+        print("the adapter, its driver, or the jumper -- not the BMS.")
+        print("Check the jumper is on the adapter's own TX and RX pins.")
+    else:
+        print(f"PARTIAL -- sent {len(probe)} bytes, got {len(echo)} back:")
+        print(f"  sent {probe.hex(' ')}")
+        print(f"  got  {echo.hex(' ')}")
+        print("Garbled echo usually means a baud or voltage-level problem.")
+    return 1
+
+
 def cmd_ports(args: argparse.Namespace) -> int:
     try:
         from serial.tools import list_ports  # type: ignore[import-untyped]
@@ -344,6 +401,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ports", help="list serial ports")
     p.set_defaults(func=cmd_ports)
 
+    p = sub.add_parser("loopback",
+                       help="prove the adapter works, with the BMS disconnected")
+    p.add_argument("--port", required=True, help="serial port, e.g. /dev/ttyUSB0")
+    p.add_argument("--baud", type=int, default=115200, help="baud (default 115200)")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="skip the 'jumper in place?' prompt")
+    p.set_defaults(func=cmd_loopback)
+
     p = sub.add_parser("scan", help="scan for the BMS over BLE")
     p.add_argument("--timeout", type=float, default=10.0, help="scan seconds")
     p.set_defaults(func=cmd_scan)
@@ -354,6 +419,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"capture file (default {_DEFAULT_CAPTURE})")
     p.add_argument("--timeout", type=float, default=15.0, help="capture seconds")
     p.add_argument("--quiet", action="store_true", help="suppress the hexdump")
+    p.add_argument("--legacy", action="store_true",
+                   help="poll with the legacy 4E 57 frame instead of Modbus, to "
+                        "check whether this board answers it at all")
     p.set_defaults(func=cmd_sniff)
 
     p = sub.add_parser("probe", help="score candidate layouts against real frames")

@@ -61,3 +61,13 @@ def test_sum8_wraps_at_one_byte():
 
 def test_check_sum8_on_empty_input():
     assert not check_sum8(b"")
+
+
+def test_legacy_frame_is_available_as_a_diagnostic():
+    """Kept so 'this board ignores 4E 57' can be tested, not just believed."""
+    from jkbms.transports.serial_link import LEGACY_POLL_FRAME, SerialTransport
+    assert LEGACY_POLL_FRAME[:2] == b"\x4E\x57"
+    # It is not Modbus, so it must not be confused with the working poll frame.
+    assert not check_modbus_crc(LEGACY_POLL_FRAME)
+    assert SerialTransport("/dev/null", legacy=True).poll_frame == LEGACY_POLL_FRAME
+    assert SerialTransport("/dev/null").poll_frame == POLL_FRAME_REFERENCE

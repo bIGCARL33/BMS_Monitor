@@ -12,9 +12,11 @@ parameter instead of being welded to 1.
 
 The BMS answers with the usual ``55 AA EB 90`` records.
 
-Do not expect the legacy ``4E 57`` command frames to work here. They get no
-response at all on this board generation; older libraries built around them
-time out silently, which reads like a wiring fault and is not one.
+Do not expect the legacy ``4E 57`` command frames to work here. They are
+reported to get no response at all on this board generation, and older
+libraries built around them time out silently -- which reads like a wiring
+fault and is not one. ``sniff --legacy`` sends that frame anyway, so the claim
+can be tested on the bench instead of taken on trust.
 
 WIRING: the 4-pin 1.25 mm JST header is GND / RX / TX / VBAT. Cross TX and RX.
 Do not connect VBAT -- it carries full pack voltage. Some board revisions
@@ -34,7 +36,8 @@ from ..crc import append_modbus_crc
 from ..frames import Frame
 from .base import Transport, TransportError
 
-__all__ = ["SerialTransport", "build_poll_frame", "POLL_FRAME_REFERENCE"]
+__all__ = ["SerialTransport", "build_poll_frame", "POLL_FRAME_REFERENCE",
+           "LEGACY_POLL_FRAME"]
 
 
 def _is_permission_error(exc: BaseException) -> bool:
@@ -49,6 +52,7 @@ def _is_permission_error(exc: BaseException) -> bool:
         return True
     return "permission denied" in str(exc).lower()
 
+
 BAUD = 115200
 
 #: Register the Monitor application pokes to request a data dump.
@@ -57,6 +61,11 @@ _POLL_REGISTER = 0x1620
 #: The exact bytes observed on the wire, kept as a regression fixture for
 #: ``build_poll_frame`` (see tests). Not used at runtime.
 POLL_FRAME_REFERENCE = bytes.fromhex("011016200001020000D6F1")
+
+#: The legacy JK command frame. Reported to get no response on this board
+#: generation, but "reported" is not "tested on this board" -- ``sniff
+#: --legacy`` sends it so the assumption can be checked rather than believed.
+LEGACY_POLL_FRAME = bytes.fromhex("4E5700130000000006030000000000006800000129")
 
 
 def build_poll_frame(device_address: int = 1) -> bytes:
@@ -83,11 +92,16 @@ class SerialTransport(Transport):
     """Poll the BMS over a USB-to-TTL adapter and yield response frames."""
 
     def __init__(self, port: str, *, baud: int = BAUD, device_address: int = 1,
-                 poll_interval_s: float = 1.0, read_timeout_s: float = 0.3) -> None:
+                 poll_interval_s: float = 1.0, read_timeout_s: float = 0.3,
+                 legacy: bool = False) -> None:
         super().__init__()
         self.port = port
         self.baud = baud
-        self.poll_frame = build_poll_frame(device_address)
+        # The legacy frame is a diagnostic, not a supported mode: it is here so
+        # "this board ignores 4E 57" can be verified on the bench rather than
+        # taken on trust from another user's board.
+        self.poll_frame = (LEGACY_POLL_FRAME if legacy
+                           else build_poll_frame(device_address))
         self.poll_interval_s = poll_interval_s
         self.read_timeout_s = read_timeout_s
         self._serial = None
