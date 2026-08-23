@@ -178,10 +178,13 @@ jkbms/
   decode.py         Frame + profile -> Reading
   verify.py         Cross-field consistency scoring
   discover.py       Find fields from first principles, no profile assumed
+  deviceinfo.py     Board identity; self-verifying ASCII offsets
   csvlog.py         CSV writer
+  dashboard.py      Live browser view (stdlib http.server)
   cli.py            Command line interface
   transports/       serial (Modbus), BLE (bleak), replay
-tests/              61 tests, no hardware required
+tests/              96 tests, no hardware required
+  fixtures/         a real frame from a JK-BD4A8S4P, firmware 15.41
 docs/RUNBOOK.md     Bench procedure, wiring, electrical cautions
 docs/PROTOCOL.md    What is verified vs. what is assumed
 ```
