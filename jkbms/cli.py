@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterator, Sequence
 
 from .csvlog import CsvLogger
+from .dashboard import ReadingBuffer, build_server
 from .decode import decode
 from .deviceinfo import decode_device_info
 from .discover import discover
@@ -45,7 +46,8 @@ def _expectation(args: argparse.Namespace) -> PackExpectation:
 def _open_transport(args: argparse.Namespace) -> Transport:
     """Build the transport the user asked for, with a clear error if under-specified."""
     if getattr(args, "replay", None):
-        return ReplayTransport(args.replay)
+        return ReplayTransport(args.replay,
+                               pace_s=getattr(args, "replay_pace", 0.0) or 0.0)
     if getattr(args, "port", None):
         from .transports.serial_link import SerialTransport
         return SerialTransport(
@@ -152,6 +154,55 @@ def cmd_loopback(args: argparse.Namespace) -> int:
         print(f"  got  {echo.hex(' ')}")
         print("Garbled echo usually means a baud or voltage-level problem.")
     return 1
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve a live browser view of the pack.
+
+    The reading happens here because a browser cannot open a BLE or serial
+    link; the page just renders what this process already holds.
+    """
+    import threading
+    import webbrowser
+
+    buffer = ReadingBuffer()
+    logger = CsvLogger(Path(args.output)) if args.output else None
+    stop = threading.Event()
+
+    def reader() -> None:
+        try:
+            for reading in _stream_readings(args, buffer=buffer):
+                if logger is not None:
+                    logger.write(reading)
+                if stop.is_set():
+                    return
+        except TransportError as exc:
+            buffer.set_error(str(exc))
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            buffer.set_error(f"{type(exc).__name__}: {exc}")
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+
+    server = build_server(buffer, args.host, args.http_port)
+    url = f"http://{args.host}:{args.http_port}/"
+    print(f"dashboard on {url}")
+    if logger is not None:
+        print(f"also logging to {args.output}")
+    print("Ctrl-C to stop.")
+    if not args.no_browser:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopping")
+    finally:
+        stop.set()
+        server.server_close()
+        if logger is not None:
+            logger.close()
+            print(f"wrote {logger.rows_written} rows to {args.output}")
+    return 0
 
 
 def cmd_deviceinfo(args: argparse.Namespace) -> int:
@@ -345,8 +396,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 1
 
 
-def _stream_readings(args: argparse.Namespace) -> Iterator:
-    """Shared live pipeline for monitor and log."""
+def _stream_readings(args: argparse.Namespace, *,
+                     buffer: "ReadingBuffer | None" = None) -> Iterator:
+    """Shared live pipeline for monitor, log and the dashboard."""
     transport = _open_transport(args)
     expect = _expectation(args)
     profile = None
@@ -360,6 +412,8 @@ def _stream_readings(args: argparse.Namespace) -> Iterator:
             reading = decode(frame, profile)
             if not verified:
                 result = verify(reading, expect)
+                if buffer is not None:
+                    buffer.set_verification(result)
                 if result.trustworthy:
                     print("# layout confirmed by cross-field checks",
                           file=sys.stderr)
@@ -371,6 +425,8 @@ def _stream_readings(args: argparse.Namespace) -> Iterator:
                     print("#   Run 'jkbms probe --discover' before trusting this.",
                           file=sys.stderr)
                 verified = True
+            if buffer is not None:
+                buffer.add(reading)
             yield reading
 
 
@@ -422,6 +478,9 @@ def _add_link_args(parser: argparse.ArgumentParser, *, replay: bool = True) -> N
     if replay:
         group.add_argument("--replay", metavar="FILE",
                            help="replay a capture file instead of live hardware")
+        group.add_argument("--replay-pace", type=float, default=0.0, metavar="SEC",
+                           help="seconds between replayed frames; use with "
+                                "'dashboard' to preview it without hardware")
     group.add_argument("--interval", type=float, default=1.0,
                        help="seconds between polls (default 1.0)")
 
@@ -446,6 +505,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ports", help="list serial ports")
     p.set_defaults(func=cmd_ports)
+
+    p = sub.add_parser("dashboard", help="live browser view of the pack")
+    _add_link_args(p)
+    _add_pack_args(p)
+    p.add_argument("--http-port", type=int, default=8765, help="web port (default 8765)")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="bind address (default 127.0.0.1, local only)")
+    p.add_argument("-o", "--output", default=None,
+                   help="also log to this CSV while the dashboard runs")
+    p.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    p.add_argument("--timeout", type=float, default=None, help="stop after N seconds")
+    p.set_defaults(func=cmd_dashboard)
 
     p = sub.add_parser("deviceinfo",
                        help="print board model, firmware, and UART capability")

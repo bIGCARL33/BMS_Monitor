@@ -125,6 +125,32 @@ Useful for working on offsets, CSV columns or tests with the pack disconnected.
 | `probe` | Score candidate layouts against real frames; `--discover` for a no-profile search |
 | `monitor` | Print live readings |
 | `log` | Write live readings to CSV |
+| `dashboard` | Live browser view at http://127.0.0.1:8765 |
+| `deviceinfo` | Board model, firmware, and whether UART can work |
+| `loopback` | Prove the USB adapter works, with the BMS disconnected |
+
+## Live dashboard
+
+```bash
+jkbms dashboard --ble <address>              # opens a browser
+jkbms dashboard --ble <address> -o run1.csv  # and log at the same time
+```
+
+Reads the pack here and serves a page on localhost -- a browser cannot open a
+BLE or serial link itself. Binds to `127.0.0.1`, so it is not exposed to the
+network. Standard library only; no web framework.
+
+Preview it without hardware by replaying a capture at a realistic pace:
+
+```bash
+jkbms dashboard --replay captures/run1.bin --replay-pace 1.0
+```
+
+Cell voltages are drawn as **deviation from the pack mean**, not bars from
+zero: four cells within a millivolt of each other make four identical
+full-height bars, which is worse than no chart. Pack voltage and current get
+separate charts rather than a shared dual axis, whose crossing points would
+mean nothing. The page shouts if the layout is unconfirmed.
 
 ## CSV output
 

@@ -7,6 +7,7 @@ coverage all happen away from the bench, with the pack disconnected.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -59,10 +60,16 @@ def _parse_hex(data: bytes) -> bytes | None:
 class ReplayTransport(Transport):
     """Feed a previously captured stream through the normal frame pipeline."""
 
-    def __init__(self, source: str | Path | bytes, *, chunk_size: int = 64) -> None:
+    def __init__(self, source: str | Path | bytes, *, chunk_size: int = 64,
+                 pace_s: float = 0.0) -> None:
         super().__init__()
         self._data = source if isinstance(source, bytes) else load_capture(source)
         self._chunk = chunk_size
+        # Replaying a capture instantly is right for probe and tests, but the
+        # dashboard's time axis collapses to a point. Pacing lets a saved
+        # capture drive the live view, so the dashboard can be tried out
+        # before the pack is on the bench.
+        self._pace_s = pace_s
 
     def open(self) -> None:  # pragma: no cover - nothing to do
         pass
@@ -75,6 +82,8 @@ class ReplayTransport(Transport):
         count = 0
         for start in range(0, len(self._data), self._chunk):
             for frame in self.assembler.feed(self._data[start : start + self._chunk]):
+                if self._pace_s and count:
+                    time.sleep(self._pace_s)
                 yield frame
                 count += 1
                 if limit is not None and count >= limit:
