@@ -185,10 +185,24 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not devices:
         print("no BLE devices found. Is the pack awake and nothing else connected?")
         return 1
-    for address, name, rssi in devices:
+    identified = [d for d in devices if d[3]]
+    for address, name, rssi, is_jk in devices:
         rssi_text = f"{rssi:4d} dBm" if rssi is not None else "  ? dBm"
-        print(f"{address}  {rssi_text}  {name or '(unnamed)'}")
-    print("\nConnect with:  jkbms monitor --ble <address>")
+        mark = "JK " if is_jk else "  ?"
+        print(f"{mark} {address}  {rssi_text}  {name or '(unnamed)'}")
+
+    best = devices[0]
+    if identified:
+        print(f"\nIdentified a JK board at {best[0]}.")
+    else:
+        # Be explicit that this is a fallback listing. Presenting an unrelated
+        # device as the BMS wastes far more time than saying "unconfirmed".
+        print("\nNo device advertised JK's service UUID or naming, so the above")
+        print("is every named device found -- none is confirmed to be the BMS.")
+        print("The board may advertise under a serial number; sniff will tell you")
+        print("for certain, because only the BMS answers with 55 AA EB 90.")
+    print("\nTry:")
+    print(f"  jkbms sniff --ble {best[0]} -o captures/ble1.bin")
     return 0
 
 

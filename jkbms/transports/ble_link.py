@@ -95,11 +95,16 @@ def _adapter_error(exc: BaseException) -> str | None:
     return None
 
 
-async def scan_async(timeout_s: float = 10.0) -> list[tuple[str, str, int | None]]:
-    """Scan for BLE devices, returning ``(address, name, rssi)`` for JK-looking ones.
+async def scan_async(
+    timeout_s: float = 10.0,
+) -> list[tuple[str, str, int | None, bool]]:
+    """Scan for BLE devices.
 
-    Falls back to reporting every named device if nothing matches the JK naming
-    hints, since the advertised name is user-changeable.
+    Returns ``(address, name, rssi, looks_like_jk)``. The flag matters: the
+    advertised name is user-changeable and some boards advertise a bare serial
+    number, so when nothing matches the JK hints we still list what was found
+    -- but the caller must be able to say "this is a guess" rather than
+    presenting an unrelated speaker as the BMS.
     """
     try:
         from bleak import BleakScanner  # type: ignore[import-untyped]
@@ -113,19 +118,21 @@ async def scan_async(timeout_s: float = 10.0) -> list[tuple[str, str, int | None
     except Exception as exc:  # pragma: no cover - hardware dependent
         hint = _adapter_error(exc)
         raise TransportError(f"BLE scan failed: {hint or exc}") from exc
-    jk: list[tuple[str, str, int | None]] = []
-    others: list[tuple[str, str, int | None]] = []
+    jk: list[tuple[str, str, int | None, bool]] = []
+    others: list[tuple[str, str, int | None, bool]] = []
     for device, adv in found.values():
         name = adv.local_name or device.name or ""
-        entry = (device.address, name, adv.rssi)
-        target = jk if (_looks_like_jk(name)
-                        or JK_SERVICE_UUID in [u.lower() for u in adv.service_uuids]
-                        ) else others
-        target.append(entry)
-    return jk or others
+        # A matching service UUID is real evidence; a matching name is a hint.
+        is_jk = (_looks_like_jk(name)
+                 or JK_SERVICE_UUID in [u.lower() for u in adv.service_uuids])
+        (jk if is_jk else others).append(
+            (device.address, name, adv.rssi, is_jk))
+    # Strongest signal first within each group.
+    key = lambda e: -(e[2] if e[2] is not None else -999)  # noqa: E731
+    return sorted(jk, key=key) or sorted(others, key=key)
 
 
-def scan(timeout_s: float = 10.0) -> list[tuple[str, str, int | None]]:
+def scan(timeout_s: float = 10.0) -> list[tuple[str, str, int | None, bool]]:
     """Blocking wrapper around :func:`scan_async`."""
     return asyncio.run(scan_async(timeout_s))
 

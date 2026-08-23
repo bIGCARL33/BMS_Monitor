@@ -219,3 +219,47 @@ def test_unrelated_ble_error_is_not_misdiagnosed():
     """Don't claim the radio is off when the real error is something else."""
     from jkbms.transports.ble_link import _adapter_error
     assert _adapter_error(Exception("device disconnected unexpectedly")) is None
+
+
+def test_scan_flags_unidentified_devices_as_guesses():
+    """A fallback listing must not be presented as a confirmed BMS."""
+    import jkbms.transports.ble_link as ble
+    from jkbms import cli
+
+    fake = [("C8:47:80:46:6E:37", "50913310848", -70, False)]
+    original = ble.scan
+    cli_scan = cli.cmd_scan
+    try:
+        ble.scan = lambda timeout_s=10.0: fake
+        import argparse
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_scan(argparse.Namespace(timeout=1.0))
+        out = buf.getvalue()
+        assert "none is confirmed" in out
+        assert "C8:47:80:46:6E:37" in out
+        # The suggested command must carry the real address, never a placeholder.
+        assert "--ble C8:47:80:46:6E:37" in out
+        assert "<address>" not in out
+    finally:
+        ble.scan = original
+
+
+def test_scan_announces_a_real_jk_match():
+    import jkbms.transports.ble_link as ble
+    from jkbms import cli
+    import argparse, io, contextlib
+
+    original = ble.scan
+    try:
+        ble.scan = lambda timeout_s=10.0: [("AA:BB:CC:DD:EE:FF", "JK-BD4A8S4P", -55, True)]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.cmd_scan(argparse.Namespace(timeout=1.0))
+        out = buf.getvalue()
+        assert "Identified a JK board" in out
+        assert "none is confirmed" not in out
+    finally:
+        ble.scan = original
