@@ -195,3 +195,27 @@ def test_non_permission_open_error_stays_terse():
     msg = SerialTransport("/dev/ttyUSB9")._open_error(FileNotFoundError("nope"))
     assert "dialout" not in msg
     assert "/dev/ttyUSB9" in msg
+
+
+def test_bluetooth_off_is_explained_not_a_traceback():
+    """A powered-off radio is the commonest BLE failure; name the fix."""
+    from jkbms.transports.ble_link import _adapter_error
+
+    hint = _adapter_error(Exception(
+        "('No powered Bluetooth adapters found. Turn on Bluetooth and try "
+        "again.', <BleakBluetoothNotAvailableReason.POWERED_OFF: 3>)"))
+    assert hint is not None
+    assert "rfkill unblock bluetooth" in hint
+    assert "bluetoothctl power on" in hint
+
+
+def test_dbus_failure_points_at_the_service():
+    from jkbms.transports.ble_link import _adapter_error
+    hint = _adapter_error(Exception("failed to connect to org.bluez over dbus"))
+    assert hint and "bluetooth.service" in hint
+
+
+def test_unrelated_ble_error_is_not_misdiagnosed():
+    """Don't claim the radio is off when the real error is something else."""
+    from jkbms.transports.ble_link import _adapter_error
+    assert _adapter_error(Exception("device disconnected unexpectedly")) is None

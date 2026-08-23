@@ -1,10 +1,15 @@
-"""BLE transport, via Bleak (which wraps WinRT on Windows).
+"""BLE transport, via Bleak (BlueZ on Linux, WinRT on Windows).
 
 This is the path that needs no board-side configuration: the BMS advertises
 already, so there is nothing to set from a phone app. Requires the pack to be
 awake and, importantly, *not* connected to anything else -- the JK accepts one
 BLE connection at a time, so a phone app or a second script holding the link
 will make this fail to connect.
+
+On Linux everything goes through BlueZ, so the radio has to be powered and
+bluetooth.service running -- a blocked or powered-off adapter is the single
+most common reason a scan comes back empty. ``_adapter_error`` turns those
+into instructions rather than tracebacks.
 
 Protocol: write 20-byte commands to characteristic FFE1 on service FFE0 and read
 the reply back from notifications on the same characteristic. Notifications
@@ -60,6 +65,36 @@ def _looks_like_jk(name: str | None) -> bool:
     return any(lowered.startswith(hint) for hint in _NAME_HINTS)
 
 
+def _adapter_error(exc: BaseException) -> str | None:
+    """Translate a BlueZ adapter problem into something actionable, or None.
+
+    A powered-off or rfkill-blocked radio is by far the most common reason a
+    scan fails, and bleak surfaces it as an exception type that did not exist
+    in older releases -- so match on the message rather than the class.
+    """
+    text = str(exc).lower()
+    if "no powered bluetooth adapters" in text or "powered_off" in text:
+        return (
+            "the Bluetooth radio is off or blocked. Turn it on:\n"
+            "    rfkill list bluetooth          # check for a soft/hard block\n"
+            "    sudo rfkill unblock bluetooth\n"
+            "    sudo systemctl start bluetooth\n"
+            "    bluetoothctl power on"
+        )
+    if "bluetooth" in text and ("not available" in text or "no adapter" in text):
+        return (
+            "no Bluetooth adapter is available to BlueZ. Check "
+            "'systemctl status bluetooth' and that the radio is not blocked "
+            "(rfkill list bluetooth)."
+        )
+    if "dbus" in text or "org.bluez" in text:
+        return (
+            "could not reach BlueZ over D-Bus. Is bluetooth.service running? "
+            "Check 'systemctl status bluetooth'."
+        )
+    return None
+
+
 async def scan_async(timeout_s: float = 10.0) -> list[tuple[str, str, int | None]]:
     """Scan for BLE devices, returning ``(address, name, rssi)`` for JK-looking ones.
 
@@ -69,9 +104,15 @@ async def scan_async(timeout_s: float = 10.0) -> list[tuple[str, str, int | None
     try:
         from bleak import BleakScanner  # type: ignore[import-untyped]
     except ImportError as exc:  # pragma: no cover - environment dependent
-        raise TransportError("bleak is not installed. Run: pip install bleak") from exc
+        raise TransportError(
+            "bleak is not installed. Run: sudo apt install python3-bleak"
+        ) from exc
 
-    found = await BleakScanner.discover(timeout=timeout_s, return_adv=True)
+    try:
+        found = await BleakScanner.discover(timeout=timeout_s, return_adv=True)
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        hint = _adapter_error(exc)
+        raise TransportError(f"BLE scan failed: {hint or exc}") from exc
     jk: list[tuple[str, str, int | None]] = []
     others: list[tuple[str, str, int | None]] = []
     for device, adv in found.values():
@@ -111,7 +152,9 @@ class BleTransport(Transport):
         try:
             from bleak import BleakClient  # type: ignore[import-untyped]
         except ImportError as exc:  # pragma: no cover - environment dependent
-            raise TransportError("bleak is not installed. Run: pip install bleak") from exc
+            raise TransportError(
+                "bleak is not installed. Run: sudo apt install python3-bleak"
+            ) from exc
 
         self._loop = asyncio.new_event_loop()
         self._queue = asyncio.Queue()
@@ -133,11 +176,11 @@ class BleTransport(Transport):
             self._client = self._loop.run_until_complete(connect())
         except Exception as exc:  # pragma: no cover - hardware dependent
             self._shutdown_loop()
-            raise TransportError(
-                f"cannot connect to {self.address}: {exc}. "
-                "The JK allows one BLE connection at a time -- make sure no "
-                "phone app or other script is holding it."
-            ) from exc
+            hint = _adapter_error(exc)
+            if hint is None:
+                hint = (f"{exc}. The JK allows one BLE connection at a time -- "
+                        "make sure no phone app or other script is holding it.")
+            raise TransportError(f"cannot connect to {self.address}: {hint}") from exc
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         assert self._queue is not None
