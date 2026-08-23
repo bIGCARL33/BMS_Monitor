@@ -1,0 +1,193 @@
+"""BLE transport, via Bleak (which wraps WinRT on Windows).
+
+This is the path that needs no board-side configuration: the BMS advertises
+already, so there is nothing to set from a phone app. Requires the pack to be
+awake and, importantly, *not* connected to anything else -- the JK accepts one
+BLE connection at a time, so a phone app or a second script holding the link
+will make this fail to connect.
+
+Protocol: write 20-byte commands to characteristic FFE1 on service FFE0 and read
+the reply back from notifications on the same characteristic. Notifications
+arrive in 20-byte fragments that concatenate into the same ``55 AA EB 90``
+records the UART link produces, so everything downstream is shared.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Iterator
+
+from ..crc import sum8
+from ..frames import Frame
+from .base import Transport, TransportError
+
+__all__ = [
+    "BleTransport", "build_command", "scan", "JK_SERVICE_UUID", "JK_CHAR_UUID",
+    "CMD_DEVICE_INFO", "CMD_CELL_INFO",
+]
+
+JK_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+JK_CHAR_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+
+_CMD_HEADER = b"\xAA\x55\x90\xEB"
+_CMD_LEN = 20
+
+CMD_DEVICE_INFO = 0x97
+CMD_CELL_INFO = 0x96
+
+#: Names JK boards advertise under. Matched case-insensitively as a prefix.
+_NAME_HINTS = ("jk-", "jk_", "jkbms")
+
+
+def build_command(command: int, value: int = 0) -> bytes:
+    """Build a 20-byte BLE command frame.
+
+    Layout: ``AA 55 90 EB <cmd> <len> <value u32 LE>`` zero-padded to 19 bytes,
+    with byte 19 an 8-bit additive checksum of the preceding 19.
+    """
+    body = bytearray(_CMD_LEN - 1)
+    body[0:4] = _CMD_HEADER
+    body[4] = command
+    body[5] = 0x00
+    body[6:10] = value.to_bytes(4, "little")
+    return bytes(body) + bytes((sum8(body),))
+
+
+def _looks_like_jk(name: str | None) -> bool:
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(lowered.startswith(hint) for hint in _NAME_HINTS)
+
+
+async def scan_async(timeout_s: float = 10.0) -> list[tuple[str, str, int | None]]:
+    """Scan for BLE devices, returning ``(address, name, rssi)`` for JK-looking ones.
+
+    Falls back to reporting every named device if nothing matches the JK naming
+    hints, since the advertised name is user-changeable.
+    """
+    try:
+        from bleak import BleakScanner  # type: ignore[import-untyped]
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise TransportError("bleak is not installed. Run: pip install bleak") from exc
+
+    found = await BleakScanner.discover(timeout=timeout_s, return_adv=True)
+    jk: list[tuple[str, str, int | None]] = []
+    others: list[tuple[str, str, int | None]] = []
+    for device, adv in found.values():
+        name = adv.local_name or device.name or ""
+        entry = (device.address, name, adv.rssi)
+        target = jk if (_looks_like_jk(name)
+                        or JK_SERVICE_UUID in [u.lower() for u in adv.service_uuids]
+                        ) else others
+        target.append(entry)
+    return jk or others
+
+
+def scan(timeout_s: float = 10.0) -> list[tuple[str, str, int | None]]:
+    """Blocking wrapper around :func:`scan_async`."""
+    return asyncio.run(scan_async(timeout_s))
+
+
+class BleTransport(Transport):
+    """Connect to a JK BMS over BLE and yield response frames.
+
+    The async Bleak client is driven from a private event loop so that callers
+    get the same simple blocking iterator the serial transport provides.
+    """
+
+    def __init__(self, address: str, *, connect_timeout_s: float = 20.0,
+                 poll_interval_s: float = 1.0) -> None:
+        super().__init__()
+        self.address = address
+        self.connect_timeout_s = connect_timeout_s
+        self.poll_interval_s = poll_interval_s
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client = None
+        self._queue: asyncio.Queue[bytes] | None = None
+
+    # -- lifecycle ---------------------------------------------------------
+    def open(self) -> None:
+        try:
+            from bleak import BleakClient  # type: ignore[import-untyped]
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise TransportError("bleak is not installed. Run: pip install bleak") from exc
+
+        self._loop = asyncio.new_event_loop()
+        self._queue = asyncio.Queue()
+
+        async def connect():
+            client = BleakClient(self.address, timeout=self.connect_timeout_s)
+            await client.connect()
+            await client.start_notify(JK_CHAR_UUID, self._on_notify)
+            # The board only starts streaming cell info after it has been asked
+            # for device info; skipping this yields a silent connection.
+            await client.write_gatt_char(
+                JK_CHAR_UUID, build_command(CMD_DEVICE_INFO), response=False)
+            await asyncio.sleep(0.2)
+            await client.write_gatt_char(
+                JK_CHAR_UUID, build_command(CMD_CELL_INFO), response=False)
+            return client
+
+        try:
+            self._client = self._loop.run_until_complete(connect())
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            self._shutdown_loop()
+            raise TransportError(
+                f"cannot connect to {self.address}: {exc}. "
+                "The JK allows one BLE connection at a time -- make sure no "
+                "phone app or other script is holding it."
+            ) from exc
+
+    def _on_notify(self, _sender, data: bytearray) -> None:
+        assert self._queue is not None
+        self._queue.put_nowait(bytes(data))
+
+    def _shutdown_loop(self) -> None:
+        if self._loop is not None:
+            self._loop.close()
+            self._loop = None
+
+    def close(self) -> None:
+        if self._client is not None and self._loop is not None:
+            try:
+                self._loop.run_until_complete(self._client.disconnect())
+            except Exception:  # pragma: no cover - best effort teardown
+                pass
+        self._client = None
+        self._shutdown_loop()
+
+    # -- data --------------------------------------------------------------
+    def raw_stream(self, *, timeout_s: float | None = None) -> Iterator[bytes]:
+        """Yield raw notification payloads as they arrive."""
+        if self._loop is None or self._queue is None or self._client is None:
+            raise TransportError("transport is not open")
+        loop, queue, client = self._loop, self._queue, self._client
+
+        async def next_chunk(budget: float) -> bytes | None:
+            try:
+                return await asyncio.wait_for(queue.get(), timeout=budget)
+            except asyncio.TimeoutError:
+                # Nudge the board; some firmware stops streaming unprompted.
+                await client.write_gatt_char(
+                    JK_CHAR_UUID, build_command(CMD_CELL_INFO), response=False)
+                return None
+
+        deadline = None if timeout_s is None else loop.time() + timeout_s
+        while deadline is None or loop.time() < deadline:
+            budget = self.poll_interval_s
+            if deadline is not None:
+                budget = min(budget, max(0.01, deadline - loop.time()))
+            chunk = loop.run_until_complete(next_chunk(budget))
+            if chunk:
+                yield chunk
+
+    def frames(self, *, limit: int | None = None,
+               timeout_s: float | None = None) -> Iterator[Frame]:
+        count = 0
+        for chunk in self.raw_stream(timeout_s=timeout_s):
+            for frame in self.assembler.feed(chunk):
+                yield frame
+                count += 1
+                if limit is not None and count >= limit:
+                    return

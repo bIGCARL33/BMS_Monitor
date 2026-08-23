@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jkbms-monitor"
+version = "0.1.0"
+description = "Laptop-side monitoring and CSV logging for JK BMS boards, over UART or BLE. No phone app required."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# The core package has no hard dependencies: replaying and decoding a capture
+# works on a bare interpreter. Link layers are optional extras so a machine
+# without a BLE radio never has to install bleak.
+dependencies = []
+
+[project.optional-dependencies]
+serial = ["pyserial>=3.5"]
+ble = ["bleak>=0.21"]
+all = ["pyserial>=3.5", "bleak>=0.21"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+jkbms = "jkbms.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jkbms*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

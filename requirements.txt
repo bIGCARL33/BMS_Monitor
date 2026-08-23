@@ -1,0 +1,7 @@
+# Link layers. Both are optional -- decoding and replaying captures needs
+# neither. Install what your path actually uses.
+pyserial>=3.5     # Path A: wired UART / Modbus
+bleak>=0.21       # Path B: BLE from the laptop
+
+# Testing
+pytest>=7.4

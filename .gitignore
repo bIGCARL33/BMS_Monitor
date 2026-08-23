@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Captures and logs are session data, not source. Keep them local unless a
+# specific one is worth committing as a protocol fixture.
+captures/*.bin
+captures/*.hex
+*.csv
