@@ -24,6 +24,9 @@ B- before plugging anything in.
 
 from __future__ import annotations
 
+import errno
+import getpass
+import os
 import time
 from typing import Iterator
 
@@ -32,6 +35,19 @@ from ..frames import Frame
 from .base import Transport, TransportError
 
 __all__ = ["SerialTransport", "build_poll_frame", "POLL_FRAME_REFERENCE"]
+
+
+def _is_permission_error(exc: BaseException) -> bool:
+    """True when ``exc`` is (or wraps) EACCES.
+
+    pyserial wraps the OSError in its own SerialException, so the errno is not
+    always reachable directly -- fall back to matching the message.
+    """
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, OSError) and exc.errno == errno.EACCES:
+        return True
+    return "permission denied" in str(exc).lower()
 
 BAUD = 115200
 
@@ -89,7 +105,27 @@ class SerialTransport(Transport):
                 bytesize=8, parity="N", stopbits=1,
             )
         except Exception as exc:  # pragma: no cover - hardware dependent
-            raise TransportError(f"cannot open {self.port}: {exc}") from exc
+            raise TransportError(self._open_error(exc)) from exc
+
+    def _open_error(self, exc: Exception) -> str:
+        """Explain an open failure, including the fix where there is an obvious one.
+
+        A permission error on the port is the single most common first-run
+        stumble on Linux, and it presents identically to a dead link -- so say
+        what to do about it rather than leaving the user to meter pins.
+        """
+        message = f"cannot open {self.port}: {exc}"
+        if not _is_permission_error(exc):
+            return message
+        user = os.environ.get("USER") or getpass.getuser()
+        return (
+            f"{message}\n"
+            f"  This is a permissions problem, not a wiring one. Your user is "
+            f"probably not in the group that owns the port.\n"
+            f"    sudo usermod -aG dialout {user}\n"
+            f"    newgrp dialout      # applies to the current shell; "
+            f"new shells pick it up automatically"
+        )
 
     def close(self) -> None:
         if self._serial is not None:

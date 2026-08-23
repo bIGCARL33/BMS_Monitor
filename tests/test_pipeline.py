@@ -152,3 +152,46 @@ def test_cli_warns_when_layout_is_unconfirmed(tmp_path, capsys):
     cap.write_bytes(capture_bytes(1))
     main(["monitor", "--replay", str(cap), "--profile", "jk02_24s"])
     assert "NOT confirmed" in capsys.readouterr().err
+
+
+# ------------------------------------------------- error reporting
+def test_missing_capture_reports_cleanly_not_a_traceback(tmp_path, capsys):
+    """A missing capture is a predictable mistake; it must not raise."""
+    assert main(["probe", "--replay", str(tmp_path / "nope.bin")]) == 2
+    err = capsys.readouterr().err
+    assert "no capture at" in err
+    assert "Traceback" not in err
+
+
+def test_empty_capture_is_explained(tmp_path, capsys):
+    empty = tmp_path / "empty.bin"
+    empty.write_bytes(b"")
+    assert main(["probe", "--replay", str(empty)]) == 2
+    assert "empty" in capsys.readouterr().err
+
+
+def test_capture_directory_is_rejected(tmp_path, capsys):
+    assert main(["probe", "--replay", str(tmp_path)]) == 2
+    assert "is a directory" in capsys.readouterr().err
+
+
+def test_permission_error_names_the_dialout_fix():
+    """EACCES on the port looks exactly like a dead link -- say the real cause."""
+    from jkbms.transports.serial_link import SerialTransport, _is_permission_error
+
+    assert _is_permission_error(PermissionError(13, "Permission denied"))
+    assert _is_permission_error(
+        Exception("could not open port /dev/ttyUSB0: [Errno 13] Permission denied"))
+    assert not _is_permission_error(FileNotFoundError("no such device"))
+
+    msg = SerialTransport("/dev/ttyUSB0")._open_error(
+        Exception("[Errno 13] Permission denied: '/dev/ttyUSB0'"))
+    assert "usermod -aG dialout" in msg
+    assert "not a wiring one" in msg
+
+
+def test_non_permission_open_error_stays_terse():
+    from jkbms.transports.serial_link import SerialTransport
+    msg = SerialTransport("/dev/ttyUSB9")._open_error(FileNotFoundError("nope"))
+    assert "dialout" not in msg
+    assert "/dev/ttyUSB9" in msg

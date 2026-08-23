@@ -106,9 +106,14 @@ def cmd_ports(args: argparse.Namespace) -> int:
     if not found:
         print("no serial ports found")
         return 1
-    for port in found:
+    # Built-in 16550 UARTs clutter the list on Linux and are never the adapter;
+    # show them, but put the USB devices where they can be found.
+    usb = [p for p in found if "USB" in p.device or "ACM" in p.device]
+    for port in usb + [p for p in found if p not in usb]:
         print(f"{port.device:12s} {port.description}")
-    print("\nNote: a port here only proves Windows sees the USB-TTL adapter.")
+    if usb:
+        print(f"\nLikely adapter: {usb[0].device} ({usb[0].description})")
+    print("\nNote: a port here only proves the OS sees the USB-TTL adapter.")
     print("It says nothing about whether the BMS is talking. Run 'sniff' next.")
     return 0
 

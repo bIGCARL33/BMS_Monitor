@@ -11,14 +11,25 @@ from pathlib import Path
 from typing import Iterator
 
 from ..frames import Frame
-from .base import Transport
+from .base import Transport, TransportError
 
 __all__ = ["ReplayTransport", "load_capture"]
 
 
 def load_capture(path: str | Path) -> bytes:
     """Load a capture written as raw binary, or as whitespace-separated hex."""
-    data = Path(path).read_bytes()
+    target = Path(path)
+    if not target.exists():
+        raise TransportError(
+            f"no capture at {target}. Record one first:\n"
+            f"  jkbms sniff --port /dev/ttyUSB0 -o {target}")
+    if target.is_dir():
+        raise TransportError(f"{target} is a directory, not a capture file")
+    data = target.read_bytes()
+    if not data:
+        raise TransportError(
+            f"{target} is empty -- the sniff captured no bytes, so there is "
+            "nothing to replay")
     # A hex capture only ever contains hex digits and whitespace/punctuation.
     sample = data[:4096]
     if sample and all(c in b"0123456789abcdefABCDEF \t\r\n:,-" for c in sample):
