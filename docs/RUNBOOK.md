@@ -32,13 +32,22 @@ the settings page is the only record you will have.
 
 ### 1. Establish that the BMS is talking
 
-A COM port in Device Manager only proves Windows sees the USB-TTL adapter. It
-says nothing about the BMS.
+A device node appearing at `/dev/ttyUSB0` only proves the kernel sees the
+USB-TTL adapter. It says nothing about the BMS.
 
-```powershell
+```bash
 jkbms ports
-jkbms sniff --port COM3 -o captures\run1.bin
+jkbms sniff --port /dev/ttyUSB0 -o captures/run1.bin
 ```
+
+If this fails with a permission error, you are not in the `dialout` group:
+
+```bash
+id -nG | grep -qw dialout || sudo usermod -aG dialout $USER
+```
+
+Log out and back in afterwards -- group membership is only picked up at login.
+A permission failure here looks identical to a dead link, so rule it out first.
 
 **Nothing at all comes back** → work through, in order:
 
@@ -53,15 +62,18 @@ off. Keep the capture and go to step 2 with `--discover`.
 
 If the UART path is dead, try BLE instead — it needs no board-side setup:
 
-```powershell
+```bash
 jkbms scan
-jkbms sniff --ble <address> -o captures\run1.bin
+jkbms sniff --ble <address> -o captures/run1.bin
 ```
+
+On Linux this goes through BlueZ; check `systemctl status bluetooth` if the
+scan finds nothing at all.
 
 ### 2. Establish that the numbers mean what you think
 
-```powershell
-jkbms probe --replay captures\run1.bin --discover
+```bash
+jkbms probe --replay captures/run1.bin --discover
 ```
 
 `CONFIRMED` → the frame's own redundancy agrees with the layout. Proceed.
@@ -74,8 +86,11 @@ are, which is usually enough to add or correct a profile in
 ### 3. Cross-check against physical reality
 
 Consistency checks prove the layout is self-consistent. They cannot catch a
-scale error that is wrong by the same factor everywhere. Once per board, confirm
-against something external:
+scale error that is wrong by the same factor everywhere.
+
+On Windows you could cross-check against JK's Monitor GUI. That software is
+Windows-only, so on Linux a multimeter is the only external reference you have.
+Once per board, confirm:
 
 - multimeter across each cell tap vs. the reported `cellNN_v`
 - multimeter across the pack vs. `pack_v`
@@ -86,8 +101,8 @@ That takes five minutes once and retires the whole class of scale bugs.
 
 ### 4. Log
 
-```powershell
-jkbms log --port COM3 -o run1.csv --profile jk02_32s --interval 1.0
+```bash
+jkbms log --port /dev/ttyUSB0 -o run1.csv --profile jk02_32s --interval 1.0
 ```
 
 Ctrl-C to stop. Rows are flushed as written, so an interrupted run keeps

@@ -1,7 +1,10 @@
 # JK BMS Laptop Monitor
 
-Monitor a JK BMS (JK-BD4A8S4P, 4S4P NMC pack) from a Windows laptop and log to
-CSV. **No phone app anywhere in the loop.**
+Monitor a JK BMS (JK-BD4A8S4P, 4S4P NMC pack) from a laptop and log to CSV.
+**No phone app anywhere in the loop.**
+
+Developed against native Linux; the package itself is cross-platform (swap
+`/dev/ttyUSB0` for `COM3` on Windows).
 
 Reads per-cell-group voltages, pack voltage, current, SOC and temperatures over
 either the wired UART link or BLE, and writes a flat CSV shaped for import into
@@ -32,28 +35,37 @@ turns up that matches nothing in `profiles.py`.
 
 Requires Python ≥ 3.10 (≥ 3.12 if you also want to try `aiobmsble`).
 
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\activate
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[all]"      # or ".[serial]" / ".[ble]" for just one path
 ```
 
+On Linux you also need permission to open the port:
+
+```bash
+sudo usermod -aG dialout $USER    # then log out and back in
+```
+
+Without it, opening the port fails in a way that looks exactly like a dead
+link -- which is a genuinely expensive hour to lose.
+
 ## Use it in this order
 
-```powershell
-jkbms ports                                  # what COM ports exist
-jkbms sniff --port COM3 -o captures\run1.bin # is the BMS actually talking?
-jkbms probe --replay captures\run1.bin --discover
-jkbms log --port COM3 -o run1.csv --profile jk02_32s
+```bash
+jkbms ports                                      # what serial ports exist
+jkbms sniff --port /dev/ttyUSB0 -o captures/run1.bin   # is the BMS talking?
+jkbms probe --replay captures/run1.bin --discover
+jkbms log --port /dev/ttyUSB0 -o run1.csv --profile jk02_32s
 ```
 
 The middle step is the one not to skip.
 
 ### Path A — wired UART
 
-```powershell
-jkbms sniff --port COM3
-jkbms monitor --port COM3
+```bash
+jkbms sniff --port /dev/ttyUSB0
+jkbms monitor --port /dev/ttyUSB0
 ```
 
 Requires the board's UART protocol to be set to **#001 (JK BMS RS485 Modbus
@@ -61,23 +73,28 @@ V1.0)** and its device address to **0**. If the board didn't ship on #001 this
 path is closed without one phone session, because setting the protocol requires
 a working connection. It costs one command to find out — run `sniff` and see.
 
+JK's own Monitor GUI is Windows-only, so on Linux it is not available as a
+second opinion on decoded values. That leaves `probe` plus a multimeter as the
+only verification route — see step 3 of the runbook.
+
 ### Path B — BLE (preferred, needs no board-side configuration)
 
-```powershell
+```bash
 jkbms scan
 jkbms monitor --ble <address>
 ```
 
 The BMS is already advertising, so there is nothing to configure. It accepts
-**one BLE connection at a time** — close any other app holding the link.
+**one BLE connection at a time** — close any other app holding the link. On
+Linux, bleak talks to BlueZ, so `bluetooth.service` must be running.
 
 ### Replay — no hardware needed
 
 Every capture can be fed back through the full pipeline:
 
-```powershell
-jkbms probe --replay captures\run1.bin --discover
-jkbms log   --replay captures\run1.bin -o run1.csv
+```bash
+jkbms probe --replay captures/run1.bin --discover
+jkbms log   --replay captures/run1.bin -o run1.csv
 ```
 
 Useful for working on offsets, CSV columns or tests with the pack disconnected.
