@@ -119,7 +119,9 @@ def _populated_cells(raw: bytes, profile: Profile) -> tuple[list[int], list[floa
 
     mask_val = read_field(raw, profile.cell_enable_mask)
     mask = int(mask_val) if mask_val is not None else None
-    if mask is not None and 0 < mask.bit_count() <= count:
+    # bin().count() rather than int.bit_count(): the latter is 3.10+, and
+    # JetPack 5 ships Python 3.8. Same answer, one interpreter generation wider.
+    if mask is not None and 0 < bin(mask).count("1") <= count:
         slots = [i for i in range(count) if mask >> i & 1]
         volts = [raw_mv[i] / 1000.0 for i in slots]
         if volts and all(CELL_MIN_V <= v <= CELL_MAX_V for v in volts):

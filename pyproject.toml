@@ -5,9 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jkbms-monitor"
 version = "0.1.0"
-description = "Laptop-side monitoring and CSV logging for JK BMS boards, over UART or BLE. No phone app required."
+description = "Monitoring, CSV logging and a live dashboard for JK BMS boards, over UART or BLE. No phone app required."
 readme = "README.md"
-requires-python = ">=3.10"
+# 3.8 is the floor so JetPack 5 (Ubuntu 20.04) works; enforced by
+# tests/test_compat.py.
+requires-python = ">=3.8"
 license = { text = "MIT" }
 
 # The core package has no hard dependencies: replaying and decoding a capture
@@ -19,7 +21,7 @@ dependencies = []
 serial = ["pyserial>=3.5"]
 ble = ["bleak>=0.21"]
 all = ["pyserial>=3.5", "bleak>=0.21"]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "vermin>=1.6"]
 
 [project.scripts]
 jkbms = "jkbms.cli:main"

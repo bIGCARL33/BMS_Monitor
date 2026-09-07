@@ -17,7 +17,7 @@ from typing import Any, TextIO
 
 from .decode import Reading
 
-__all__ = ["CsvLogger"]
+__all__ = ["CsvLogger", "CsvLogError"]
 
 #: Columns that always appear, in order, before the per-cell columns.
 _LEADING = [
@@ -42,13 +42,28 @@ def _fmt(value: float | None, places: int) -> str:
     return "" if value is None else f"{value:.{places}f}"
 
 
+class CsvLogError(RuntimeError):
+    """Raised rather than destroying a log the operator meant to keep."""
+
+
 @dataclass
 class CsvLogger:
-    """Append decoded readings to a CSV file."""
+    """Write decoded readings to a CSV file.
+
+    Refuses by default to truncate an existing non-empty file. A discharge run
+    can take hours and cannot be repeated from memory, so silently overwriting
+    one because a command was re-run -- or because a systemd unit restarted --
+    is the worst thing this class could do. Pass ``append`` to continue a file
+    or ``overwrite`` to say you really meant it.
+    """
 
     path: Path
     #: Also write per-cell resistance columns when the BMS reports them.
     include_resistance: bool = False
+    #: Continue an existing file instead of starting a new one.
+    append: bool = False
+    #: Permit truncating an existing non-empty file.
+    overwrite: bool = False
 
     _handle: TextIO | None = field(default=None, init=False, repr=False)
     # csv.writer is a factory function, not a class, so there is no public type
@@ -72,15 +87,45 @@ class CsvLogger:
         )
         return _LEADING + cells + resistance + _TRAILING
 
+    def _existing_header(self) -> list | None:
+        """The header row of an existing file, or None if there isn't one."""
+        try:
+            with self.path.open("r", newline="", encoding="utf-8") as handle:
+                return next(csv.reader(handle), None)
+        except (OSError, StopIteration):
+            return None
+
     def _open(self, reading: Reading) -> None:
         self._cell_count = reading.cell_count
         self._has_resistance_cols = bool(
             self.include_resistance and reading.resistances_ohm)
+        header = self._header()
+
+        occupied = self.path.exists() and self.path.stat().st_size > 0
+        if occupied and self.append:
+            existing = self._existing_header()
+            if existing is not None and existing != header:
+                raise CsvLogError(
+                    f"cannot append to {self.path}: its columns differ from this "
+                    f"run's ({len(existing)} vs {len(header)}). Log to a new file "
+                    f"instead.")
+            mode, write_header = "a", existing is None
+        elif occupied and not self.overwrite:
+            raise CsvLogError(
+                f"{self.path} already exists and is not empty. Refusing to "
+                f"overwrite a log.\n"
+                f"  --append   continue it\n"
+                f"  --force    overwrite it\n"
+                f"  or use a dated name, e.g. -o 'pack-%Y%m%d-%H%M%S.csv'")
+        else:
+            mode, write_header = "w", True
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # newline="" is required on Windows or csv emits blank rows between records.
-        self._handle = self.path.open("w", newline="", encoding="utf-8")
+        self._handle = self.path.open(mode, newline="", encoding="utf-8")
         self._writer = csv.writer(self._handle)
-        self._writer.writerow(self._header())
+        if write_header:
+            self._writer.writerow(header)
         self._t0 = reading.timestamp.timestamp()
 
     def write(self, reading: Reading) -> None:

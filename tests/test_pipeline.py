@@ -282,3 +282,72 @@ def test_binary_capture_is_not_mistaken_for_hex(tmp_path):
     path = tmp_path / "cap.bin"
     path.write_bytes(raw)
     assert load_capture(path) == raw
+
+
+# ------------------------------------------------- log durability
+def test_refuses_to_truncate_an_existing_log(tmp_path, capsys):
+    """A discharge run cannot be repeated from memory. Never silently wipe one."""
+    cap = tmp_path / "cap.bin"; cap.write_bytes(capture_bytes(3))
+    out = tmp_path / "run.csv"
+    assert main(["log", "--replay", str(cap), "-o", str(out), "--quiet"]) == 0
+    first = out.read_text()
+
+    assert main(["log", "--replay", str(cap), "-o", str(out), "--quiet"]) == 2
+    err = capsys.readouterr().err
+    assert "Refusing to overwrite" in err
+    assert "--append" in err and "--force" in err
+    assert out.read_text() == first, "the existing log was modified"
+
+
+def test_force_overwrites_when_asked(tmp_path):
+    cap = tmp_path / "cap.bin"; cap.write_bytes(capture_bytes(3))
+    out = tmp_path / "run.csv"
+    main(["log", "--replay", str(cap), "-o", str(out), "--quiet"])
+    assert main(["log", "--replay", str(cap), "-o", str(out), "--quiet", "--force"]) == 0
+    assert len(list(csv.reader(out.open()))) == 4          # header + 3, not 7
+
+
+def test_append_continues_the_file_without_a_second_header(tmp_path):
+    cap = tmp_path / "cap.bin"; cap.write_bytes(capture_bytes(3))
+    out = tmp_path / "run.csv"
+    main(["log", "--replay", str(cap), "-o", str(out), "--quiet"])
+    assert main(["log", "--replay", str(cap), "-o", str(out), "--quiet", "--append"]) == 0
+    rows = list(csv.reader(out.open()))
+    assert len(rows) == 7                                   # header + 3 + 3
+    assert rows.count(rows[0]) == 1, "header written twice"
+
+
+def test_append_refuses_a_mismatched_column_set(tmp_path, capsys):
+    """Appending 4-cell rows under an 8-cell header would corrupt the file."""
+    from jkbms.csvlog import CsvLogError, CsvLogger
+    from jkbms.decode import decode
+    from jkbms.frames import Frame
+    import pytest
+
+    out = tmp_path / "run.csv"
+    wide = decode(Frame(build_cell_info_frame(JK02_32S, [3.9] * 8)), JK02_32S)
+    with CsvLogger(out) as logger:
+        logger.write(wide)
+
+    narrow = decode(Frame(build_cell_info_frame(JK02_32S, CELLS)), JK02_32S)
+    with pytest.raises(CsvLogError, match="columns differ"):
+        with CsvLogger(out, append=True) as logger:
+            logger.write(narrow)
+
+
+def test_empty_existing_file_is_not_treated_as_precious(tmp_path):
+    cap = tmp_path / "cap.bin"; cap.write_bytes(capture_bytes(2))
+    out = tmp_path / "run.csv"
+    out.touch()
+    assert main(["log", "--replay", str(cap), "-o", str(out), "--quiet"]) == 0
+
+
+def test_strftime_codes_in_the_output_path_expand(tmp_path):
+    """A dated name is what makes a restarting service safe."""
+    from datetime import datetime
+    cap = tmp_path / "cap.bin"; cap.write_bytes(capture_bytes(2))
+    pattern = str(tmp_path / "pack-%Y%m%d.csv")
+    assert main(["log", "--replay", str(cap), "-o", pattern, "--quiet"]) == 0
+    expected = tmp_path / f"pack-{datetime.now():%Y%m%d}.csv"
+    assert expected.exists()
+    assert not (tmp_path / "pack-%Y%m%d.csv").exists()

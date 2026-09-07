@@ -151,3 +151,87 @@ def test_zero_reference_line_sits_above_the_marks():
     fill = PAGE[PAGE.index(".devbar .fill"):PAGE.index(".legend")]
     assert "z-index:3" in mid
     assert "z-index:2" in fill
+
+
+# ------------------------------------------------- headless / LAN access
+def test_primary_address_returns_something_usable():
+    """The headless path must print an address another machine can reach."""
+    import ipaddress
+    from jkbms.cli import _primary_address
+    addr = _primary_address()
+    assert addr
+    # Either a real IP, or a hostname fallback -- never the useless 0.0.0.0.
+    assert addr != "0.0.0.0"
+    try:
+        ipaddress.ip_address(addr)
+    except ValueError:
+        assert addr.strip(), "fallback must still be a non-empty hostname"
+
+
+def test_lan_flag_binds_all_interfaces(tmp_path, capsys, monkeypatch):
+    """--lan is the headless case: bind 0.0.0.0 and say so out loud."""
+    import threading
+    from jkbms import cli
+    from .test_pipeline import capture_bytes
+
+    cap = tmp_path / "cap.bin"
+    cap.write_bytes(capture_bytes(2))
+
+    bound = {}
+    real_build = cli.build_server
+
+    def spy(buffer, host, port):
+        bound["host"] = host
+        server = real_build(buffer, "127.0.0.1", 0)
+        # Stop almost immediately; we are testing the bind decision, not serving.
+        threading.Timer(0.4, server.shutdown).start()
+        return server
+
+    monkeypatch.setattr(cli, "build_server", spy)
+    cli.main(["dashboard", "--replay", str(cap), "--lan", "--no-browser"])
+    assert bound["host"] == "0.0.0.0"
+    out = capsys.readouterr().out
+    assert "from another machine" in out
+    assert "no auth" in out.lower()
+
+
+def test_default_binds_loopback_only(tmp_path, capsys, monkeypatch):
+    import threading
+    from jkbms import cli
+    from .test_pipeline import capture_bytes
+
+    cap = tmp_path / "cap.bin"
+    cap.write_bytes(capture_bytes(2))
+    bound = {}
+    real_build = cli.build_server
+
+    def spy(buffer, host, port):
+        bound["host"] = host
+        server = real_build(buffer, "127.0.0.1", 0)
+        threading.Timer(0.4, server.shutdown).start()
+        return server
+
+    monkeypatch.setattr(cli, "build_server", spy)
+    cli.main(["dashboard", "--replay", str(cap), "--no-browser"])
+    assert bound["host"] == "127.0.0.1"
+    assert "no auth" not in capsys.readouterr().out.lower()
+
+
+def test_port_already_in_use_is_explained(tmp_path, capsys):
+    """Two dashboards is a normal mistake; the error should name the fix."""
+    from jkbms import cli
+    from .test_pipeline import capture_bytes
+
+    blocker = build_server(ReadingBuffer(), "127.0.0.1", 0)
+    port = blocker.server_address[1]
+    cap = tmp_path / "cap.bin"
+    cap.write_bytes(capture_bytes(1))
+    try:
+        rc = cli.main(["dashboard", "--replay", str(cap), "--no-browser",
+                       "--http-port", str(port)])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "cannot bind" in err
+        assert "already be running" in err
+    finally:
+        blocker.server_close()

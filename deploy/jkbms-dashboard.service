@@ -1,0 +1,69 @@
+#  JK BMS dashboard + logger, as a systemd service.
+#
+#  Intended for an always-on board (a Jetson, a Pi) that watches a pack
+#  unattended. Install with deploy/install-service.sh, which fills in the
+#  placeholders below -- or edit them yourself and drop this in
+#  /etc/systemd/system/.
+#
+#  Placeholders: __USER__ __GROUP__ __WORKDIR__ __PYTHON__ __BLE_ADDR__ __LOGDIR__
+
+[Unit]
+Description=JK BMS dashboard and CSV logger
+Documentation=file://__WORKDIR__/docs/JETSON.md
+
+# BLE needs BlueZ up. bluetooth.target alone does not guarantee the daemon is
+# ready to answer, so wait on the service too.
+After=network-online.target bluetooth.target bluetooth.service
+Wants=network-online.target bluetooth.target
+
+#  Restart rate limit. These live in [Unit], not [Service] -- systemd moved
+#  them in v229 and silently ignores them in the wrong section, which would
+#  leave a failing unit restarting forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__WORKDIR__
+
+#  The dated filename is load-bearing. A restart must never land on top of the
+#  previous run's data, and CsvLogger refuses to truncate an existing log --
+#  which would turn a crash-restart loop into a stopped service. A fresh file
+#  per start sidesteps both.
+ExecStart=__PYTHON__ -m jkbms.cli dashboard \
+    --ble __BLE_ADDR__ \
+    --lan \
+    --http-port 8765 \
+    --no-browser \
+    --interval 1.0 \
+    -o __LOGDIR__/pack-%%Y%%m%%d-%%H%%M%%S.csv
+
+#  A pack that has gone to sleep, or a radio that dropped, should not spin;
+#  the rate limit in [Unit] above bounds it.
+Restart=on-failure
+RestartSec=15
+
+#  The BMS accepts one BLE connection at a time, so a second instance would
+#  simply fail to connect and thrash. Keep it to one.
+#  (systemd enforces this by unit name; do not template this unit.)
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jkbms
+
+#  Modest hardening. The process needs BlueZ over D-Bus, a network socket, and
+#  its log directory -- nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__LOGDIR__
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

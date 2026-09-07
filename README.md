@@ -1,9 +1,10 @@
-# JK BMS Laptop Monitor
+# JK BMS Monitor
 
-Monitor a JK BMS (JK-BD4A8S4P, 4S4P NMC pack) from a laptop and log to CSV.
+Monitor a JK BMS (JK-BD4A8S4P, 4S4P NMC pack) and log to CSV.
 **No phone app anywhere in the loop.**
 
-Developed against native Linux; the package itself is cross-platform (swap
+Runs on a laptop or on an always-on board — developed against native Linux on
+both x86-64 and a Jetson Orin Nano (aarch64); cross-platform otherwise (swap
 `/dev/ttyUSB0` for `COM3` on Windows).
 
 Reads per-cell-group voltages, pack voltage, current, SOC and temperatures over
@@ -33,7 +34,13 @@ turns up that matches nothing in `profiles.py`.
 
 ## Install
 
-Requires Python ≥ 3.10 (≥ 3.12 if you also want to try `aiobmsble`).
+Requires **Python ≥ 3.8**, so it runs on JetPack 5 (Ubuntu 20.04) as well as
+current desktops. `tests/test_compat.py` enforces that floor.
+
+New machine? Run `jkbms doctor` first — it checks the interpreter, both link
+libraries, the Bluetooth radio, serial ports and group membership, and prints
+the fix for anything broken. Every check corresponds to a failure that
+otherwise looks like a wiring fault.
 
 ```bash
 python3 -m venv .venv
@@ -128,6 +135,7 @@ Useful for working on offsets, CSV columns or tests with the pack disconnected.
 | `dashboard` | Live browser view at http://127.0.0.1:8765 |
 | `deviceinfo` | Board model, firmware, and whether UART can work |
 | `loopback` | Prove the USB adapter works, with the BMS disconnected |
+| `doctor` | Check this machine can talk to the BMS at all |
 
 ## Live dashboard
 
@@ -179,14 +187,17 @@ jkbms/
   verify.py         Cross-field consistency scoring
   discover.py       Find fields from first principles, no profile assumed
   deviceinfo.py     Board identity; self-verifying ASCII offsets
+  doctor.py         Environment preflight
   csvlog.py         CSV writer
   dashboard.py      Live browser view (stdlib http.server)
   cli.py            Command line interface
   transports/       serial (Modbus), BLE (bleak), replay
-tests/              96 tests, no hardware required
+tests/              159 tests, no hardware required
   fixtures/         a real frame from a JK-BD4A8S4P, firmware 15.41
+deploy/             systemd unit + installer for always-on boards
 docs/RUNBOOK.md     Bench procedure, wiring, electrical cautions
 docs/PROTOCOL.md    What is verified vs. what is assumed
+docs/JETSON.md      Running on a Jetson Orin Nano (headless, as a service)
 ```
 
 ## Safety
@@ -212,3 +223,19 @@ python -m pytest tests/ -q
 Runs without hardware. Note the synthetic frames in `tests/synth.py` are built
 *from* a profile, so they validate the decoder and the verifier — not the
 offsets themselves. Only real hardware plus `probe` can do that.
+
+## Always-on boards
+
+For a Jetson, Pi or similar watching a pack continuously, see
+[`docs/JETSON.md`](docs/JETSON.md). In short:
+
+```bash
+python3 -m jkbms.cli doctor                          # preflight
+python3 -m jkbms.cli dashboard --ble <addr> --lan    # headless: view from a laptop
+sudo ./deploy/install-service.sh <addr>              # run it at boot
+```
+
+The logger refuses to truncate an existing CSV — a discharge run cannot be
+repeated from memory — so use `--append`, `--force`, or a dated name like
+`-o 'pack-%Y%m%d-%H%M%S.csv'`. The systemd unit uses the last of those, which is
+what makes a restart safe.

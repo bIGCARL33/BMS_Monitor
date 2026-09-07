@@ -17,16 +17,20 @@ worse than no data at all.
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from .csvlog import CsvLogger
+from .csvlog import CsvLogError, CsvLogger
 from .dashboard import ReadingBuffer, build_server
 from .decode import decode
 from .deviceinfo import decode_device_info
 from .discover import discover
+from .doctor import evaluate, probe_environment, report
 from .frames import Frame
 from .profiles import PROFILES, candidate_profiles, get_profile
 from .transports.base import Transport, TransportError
@@ -98,6 +102,33 @@ def _collect(transport: Transport, *, count: int, timeout_s: float) -> list[Fram
     return frames
 
 
+def _log_path(raw: str) -> Path:
+    """Expand strftime codes in an output path.
+
+    Lets a long-running service write one file per start
+    (``-o 'pack-%Y%m%d-%H%M%S.csv'``) so a restart can never land on top of the
+    previous run.
+    """
+    return Path(datetime.now().strftime(raw))
+
+
+def _primary_address() -> str:
+    """Best guess at this machine's LAN address, for the headless case.
+
+    Connecting a UDP socket sets a route without sending anything, which picks
+    the interface the default route would use -- more reliable than
+    gethostbyname, which often returns 127.0.1.1 on Debian derivatives.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))       # TEST-NET-1: routable, never real
+        return probe.getsockname()[0]
+    except OSError:
+        return socket.gethostname()
+    finally:
+        probe.close()
+
+
 # ---------------------------------------------------------------- commands
 def cmd_loopback(args: argparse.Namespace) -> int:
     """Prove the adapter itself works, with the BMS out of the picture.
@@ -156,6 +187,17 @@ def cmd_loopback(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check the environment and print the fix for anything broken.
+
+    Worth running first on any new machine. Every check here corresponds to a
+    failure that otherwise looks like a wiring fault.
+    """
+    findings = evaluate(probe_environment())
+    print(report(findings))
+    return 1 if any(f.failed for f in findings) else 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     """Serve a live browser view of the pack.
 
@@ -166,7 +208,8 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     import webbrowser
 
     buffer = ReadingBuffer()
-    logger = CsvLogger(Path(args.output)) if args.output else None
+    logger = (CsvLogger(_log_path(args.output), append=args.append,
+                        overwrite=args.force) if args.output else None)
     stop = threading.Event()
 
     def reader() -> None:
@@ -184,14 +227,33 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
 
-    server = build_server(buffer, args.host, args.http_port)
-    url = f"http://{args.host}:{args.http_port}/"
-    print(f"dashboard on {url}")
+    host = "0.0.0.0" if args.lan else args.host
+    try:
+        server = build_server(buffer, host, args.http_port)
+    except OSError as exc:
+        stop.set()
+        raise TransportError(
+            f"cannot bind {host}:{args.http_port}: {exc}. "
+            f"Another dashboard may already be running; try --http-port "
+            f"{args.http_port + 1}.") from exc
+
+    local_url = f"http://127.0.0.1:{args.http_port}/"
+    if host == "0.0.0.0":
+        # A headless board is the whole reason for this mode, so print the
+        # address the *other* machine needs rather than a useless 0.0.0.0 URL.
+        addr = _primary_address()
+        print(f"dashboard on http://{addr}:{args.http_port}/  (from another machine)")
+        print(f"            {local_url}  (on this machine)")
+        print("NOTE: reachable by anyone on this network. There is no auth, and")
+        print("      the page exposes pack telemetry only -- but it is open.")
+    else:
+        print(f"dashboard on {local_url}")
     if logger is not None:
         print(f"also logging to {args.output}")
     print("Ctrl-C to stop.")
-    if not args.no_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    # Opening a browser on a headless board just logs an error.
+    if not args.no_browser and host != "0.0.0.0" and os.environ.get("DISPLAY"):
+        threading.Timer(0.5, lambda: webbrowser.open(local_url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -444,7 +506,9 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
 
 def cmd_log(args: argparse.Namespace) -> int:
-    logger = CsvLogger(Path(args.output), include_resistance=args.resistance)
+    out_path = _log_path(args.output)
+    logger = CsvLogger(out_path, include_resistance=args.resistance,
+                       append=args.append, overwrite=args.force)
     # Rewrite one line in place on a terminal; on a redirect that would smear
     # every sample onto a single line, so fall back to one line per sample.
     interactive = sys.stdout.isatty()
@@ -463,7 +527,7 @@ def cmd_log(args: argparse.Namespace) -> int:
         pass
     if not args.quiet and interactive:
         print()
-    print(f"wrote {count} rows to {args.output}")
+    print(f"wrote {count} rows to {out_path}")
     return 0 if count else 1
 
 
@@ -506,15 +570,25 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ports", help="list serial ports")
     p.set_defaults(func=cmd_ports)
 
+    p = sub.add_parser("doctor",
+                       help="check this machine can talk to the BMS at all")
+    p.set_defaults(func=cmd_doctor)
+
     p = sub.add_parser("dashboard", help="live browser view of the pack")
     _add_link_args(p)
     _add_pack_args(p)
     p.add_argument("--http-port", type=int, default=8765, help="web port (default 8765)")
     p.add_argument("--host", default="127.0.0.1",
                    help="bind address (default 127.0.0.1, local only)")
+    p.add_argument("--lan", action="store_true",
+                   help="bind all interfaces so another machine can view it -- "
+                        "the usual choice on a headless board. No auth.")
     p.add_argument("-o", "--output", default=None,
                    help="also log to this CSV while the dashboard runs")
     p.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    p.add_argument("--append", action="store_true",
+                   help="continue an existing CSV instead of refusing")
+    p.add_argument("--force", action="store_true", help="overwrite an existing CSV")
     p.add_argument("--timeout", type=float, default=None, help="stop after N seconds")
     p.set_defaults(func=cmd_dashboard)
 
@@ -572,6 +646,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=None, help="stop after N seconds")
     p.add_argument("--resistance", action="store_true",
                    help="include per-cell resistance columns")
+    p.add_argument("--append", action="store_true",
+                   help="continue an existing CSV instead of refusing")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing CSV")
     p.add_argument("--quiet", action="store_true", help="no progress line")
     p.set_defaults(func=cmd_log)
 
@@ -583,6 +661,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return args.func(args)
     except TransportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except CsvLogError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
