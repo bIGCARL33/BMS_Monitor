@@ -28,7 +28,7 @@ from .base import Transport, TransportError
 
 __all__ = [
     "BleTransport", "build_command", "scan", "JK_SERVICE_UUID", "JK_CHAR_UUID",
-    "CMD_DEVICE_INFO", "CMD_CELL_INFO",
+    "CMD_DEVICE_INFO", "CMD_CELL_INFO", "CMD_SETTINGS",
 ]
 
 JK_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
@@ -39,6 +39,8 @@ _CMD_LEN = 20
 
 CMD_DEVICE_INFO = 0x97
 CMD_CELL_INFO = 0x96
+#: Asks the board to send its settings record (frame type 0x01).
+CMD_SETTINGS = 0x95
 
 #: Names JK boards advertise under. Matched case-insensitively as a prefix.
 _NAME_HINTS = ("jk-", "jk_", "jkbms")
@@ -188,6 +190,28 @@ class BleTransport(Transport):
                 hint = (f"{exc}. The JK allows one BLE connection at a time -- "
                         "make sure no phone app or other script is holding it.")
             raise TransportError(f"cannot connect to {self.address}: {hint}") from exc
+
+    def request(self, command: int, value: int = 0) -> None:
+        """Send a command frame on the open link.
+
+        Used to ask for the settings record and to write settings. Writes go
+        through :mod:`jkbms.control`, which builds the frame and enforces the
+        read-back verification -- do not call this with a raw write code
+        directly.
+        """
+        if self._loop is None or self._client is None:
+            raise TransportError("transport is not open")
+        self._loop.run_until_complete(self._client.write_gatt_char(
+            JK_CHAR_UUID, build_command(command, value), response=False))
+
+    def send_raw(self, frame: bytes) -> None:
+        """Write a pre-built 20-byte command frame."""
+        if self._loop is None or self._client is None:
+            raise TransportError("transport is not open")
+        if len(frame) != _CMD_LEN:
+            raise TransportError(f"command frame must be {_CMD_LEN} bytes")
+        self._loop.run_until_complete(self._client.write_gatt_char(
+            JK_CHAR_UUID, frame, response=False))
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         assert self._queue is not None

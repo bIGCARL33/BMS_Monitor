@@ -136,6 +136,36 @@ Useful for working on offsets, CSV columns or tests with the pack disconnected.
 | `deviceinfo` | Board model, firmware, and whether UART can work |
 | `loopback` | Prove the USB adapter works, with the BMS disconnected |
 | `doctor` | Check this machine can talk to the BMS at all |
+| `settings` | Read/export the settings frame — the config export JK doesn't provide |
+| `console` | Interactive monitor **and control** session |
+
+## Changing settings
+
+`jkbms console` opens one BLE link and gives you a prompt: `status`, `cells`,
+`switches`, `settings`, and `set NAME VALUE` for the charge/discharge MOSFETs,
+the balancer, and protection thresholds.
+
+Writing to a BMS is not like reading from one. A wrong read offset gives a
+wrong number; a wrong write changes how a lithium pack protects itself, and
+JK's software has no config export, so there is no undo unless you build one.
+Three rules follow, and the code enforces them rather than documenting them:
+
+1. **A settings backup is taken before the first write of a session.** That
+   file *is* the config export JK omits.
+2. **Every write is verified by read-back.** Write, re-read the settings frame,
+   diff. Exactly the intended word changed, or you are told loudly — including
+   the case where the register number turns out to be wrong for your firmware
+   and something else moved instead.
+3. **A setting with no known location in the settings frame cannot be written
+   at all**, because such a write could not be checked.
+
+Protection thresholds (`cell_ovp`, `cell_uvp`) additionally require an explicit
+acknowledgement and are range-clamped. The switches are the safe place to start:
+flipping one back restores the previous state exactly.
+
+**The register numbers are unverified on firmware 15.41.** They come from
+community reverse-engineering. The read-back diff is what makes acting on them
+defensible — it is designed to catch a wrong register on the first attempt.
 
 ## Live dashboard
 

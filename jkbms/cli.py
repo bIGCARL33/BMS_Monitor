@@ -27,6 +27,7 @@ from typing import Iterator, Sequence
 
 from .csvlog import CsvLogError, CsvLogger
 from .dashboard import ReadingBuffer, build_server
+from .console import run_console
 from .decode import decode
 from .deviceinfo import decode_device_info
 from .discover import discover
@@ -185,6 +186,72 @@ def cmd_loopback(args: argparse.Namespace) -> int:
         print(f"  got  {echo.hex(' ')}")
         print("Garbled echo usually means a baud or voltage-level problem.")
     return 1
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    """Interactive monitor and control session."""
+    transport = _open_transport(args)
+    expect = _expectation(args)
+    with transport:
+        frames = []
+        for frame in transport.cell_info_frames(limit=1, timeout_s=args.timeout):
+            frames.append(frame)
+        if not frames:
+            raise TransportError("no cell-info frame arrived; cannot start")
+        profile, _ = _resolve_profile(args, frames)
+        result = verify(decode(frames[-1], profile), expect)
+        print(f"# profile {profile.name} -- "
+              + ("layout confirmed" if result.trustworthy
+                 else "LAYOUT NOT CONFIRMED, values may be wrong"))
+        if not result.trustworthy:
+            for check in result.failures:
+                print(f"#   {check.name}: {check.detail}")
+            print("#   Run 'jkbms probe --discover' before changing anything.")
+        return run_console(transport, profile, backup_dir=args.backup_dir)
+
+
+def cmd_settings(args: argparse.Namespace) -> int:
+    """Read and export the settings frame without an interactive session."""
+    from .frames import FrameAssembler
+    from .settings import SETTINGS_FRAME_TYPE, describe_words
+
+    if args.replay:
+        frames = [f for f in FrameAssembler().feed(load_capture(args.replay))
+                  if f.type_byte == SETTINGS_FRAME_TYPE]
+    else:
+        transport = _open_transport(args)
+        frames = []
+        with transport:
+            request = getattr(transport, "request", None)
+            if request is not None:
+                from .transports.ble_link import CMD_SETTINGS
+                try:
+                    request(CMD_SETTINGS)
+                except Exception:
+                    pass
+            for frame in transport.frames(timeout_s=args.timeout):
+                if frame.type_byte == SETTINGS_FRAME_TYPE:
+                    frames.append(frame)
+                    break
+    if not frames:
+        print("no settings frame seen. The board sends one unprompted every so "
+              "often -- try a longer --timeout, or capture with 'sniff' and "
+              "pass --replay.", file=sys.stderr)
+        return 1
+
+    raw = frames[-1].raw
+    if args.output:
+        out = _log_path(args.output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            "# JK BMS settings frame\n"
+            f"# saved {datetime.now().isoformat(timespec='seconds')}\n"
+            "# The config export JK's own software does not provide.\n"
+            + "\n".join(" ".join(f"{b:02X}" for b in raw[i:i + 16])
+                        for i in range(0, len(raw), 16)) + "\n")
+        print(f"saved {len(raw)} bytes to {out}")
+    print(describe_words(raw, only_interesting=not args.all))
+    return 0
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -569,6 +636,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("ports", help="list serial ports")
     p.set_defaults(func=cmd_ports)
+
+    p = sub.add_parser("console",
+                       help="interactive monitor + control session")
+    _add_link_args(p)
+    _add_pack_args(p)
+    p.add_argument("--timeout", type=float, default=30.0,
+                   help="seconds to wait for the first frame")
+    p.add_argument("--backup-dir", default="settings-backups",
+                   help="where settings backups are written before any write")
+    p.set_defaults(func=cmd_console)
+
+    p = sub.add_parser("settings",
+                       help="read/export the settings frame (the config export "
+                            "JK does not provide)")
+    _add_link_args(p)
+    p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait")
+    p.add_argument("-o", "--output", default=None, help="save the raw frame here")
+    p.add_argument("--all", action="store_true", help="include zero words")
+    p.set_defaults(func=cmd_settings)
 
     p = sub.add_parser("doctor",
                        help="check this machine can talk to the BMS at all")
