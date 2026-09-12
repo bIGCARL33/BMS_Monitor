@@ -257,6 +257,7 @@ deploy/             systemd unit + installer for always-on boards
 docs/RUNBOOK.md     Bench procedure, wiring, electrical cautions
 docs/PROTOCOL.md    What is verified vs. what is assumed
 docs/JETSON.md      Running on a Jetson Orin Nano (headless, as a service)
+docs/HANDOFF.md     State of play: what is verified, what is not, what is next
 ```
 
 ## Safety
