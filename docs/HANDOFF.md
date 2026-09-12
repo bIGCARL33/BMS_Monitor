@@ -123,35 +123,46 @@ more trustworthy than extending the old series.
 
 ---
 
-## The pack, as of 2026-09-12
+## The pack, as of 2026-09-12 — the 31 mV split looks resolved
 
-Two readings, three weeks apart, both at rest:
+Three readings now:
 
-| | Aug 23 | Sep 12 | change |
+| | Aug 23 | Sep 12 (pre-fix) | Sep 12 (post cell-count fix) |
 |---|---|---|---|
-| group 1 | 3.447 | 3.442 | −5 mV |
-| group 2 | 3.446 | 3.442 | −4 mV |
-| group 3 | 3.446 | 3.472 | **+26 mV** |
-| group 4 | 3.446 | 3.473 | **+27 mV** |
-| spread | 1.0 mV | **31.0 mV** | |
+| group 1 | 3.447 | 3.442 | 3.418 |
+| group 2 | 3.446 | 3.442 | 3.417 |
+| group 3 | 3.446 | 3.472 | 3.413 |
+| group 4 | 3.446 | 3.473 | 3.415 |
+| spread | 1.0 mV | **31.0 mV** | **4–5 mV** |
 
-The split is clean: groups 1–2 low, 3–4 high, ~30.5 mV apart, almost nothing
-within each pair. Random cell variance does not sort itself into halves.
+The "pre-fix" reading was taken while the BMS had the cell-count-8-vs-4
+misconfiguration described above (fault status at the time is unknown — it
+may or may not have been actively tripped, but the wrong cell count was
+already in effect). Immediately after correcting it, the spread dropped back
+to roughly the Aug 23 baseline, with groups 3–4 coming *down* to meet 1–2
+rather than 1–2 catching up. That fits hypothesis 3 below far better than a
+real imbalance: a real 27 mV of extra charge in two groups doesn't just
+disappear when an unrelated setting is corrected, but a sensing glitch tied
+to the fault state would.
 
-A charger was briefly connected between the readings, which explains the
-upward movement (passive balancing can only bleed cells down, never raise
-them). It does not explain the pairing.
+**Not fully closed** — this is one post-fix reading, and SOC/voltage moved
+too (0% → 44%, ~13.8 V → 13.66 V), so some of this could be the pack simply
+having relaxed further or discharged slightly in the intervening time, not
+purely the fix. Treat "measurement artifact, now resolved" as the leading
+hypothesis, not a confirmed conclusion.
 
-Three hypotheses, needing different responses:
+Original hypotheses, for reference:
 
-1. **Real imbalance** — groups 1–2 self-discharging faster.
-2. **Incomplete relaxation** after the partial charge.
-3. **Measurement artifact** — sense-wire resistance or ADC offset on channels
-   1–2. The suspiciously clean 2+2 split makes this worth ruling out.
+1. **Real imbalance** — groups 1–2 self-discharging faster. Now the weaker
+   explanation.
+2. **Incomplete relaxation** after a partial charge (the pre-fix reading
+   followed a brief charger connection).
+3. **Measurement artifact** tied to the cell-count fault — now the leading
+   explanation.
 
-**A multimeter across each group's taps distinguishes them.** If all four read
-~3.457 V, the BMS's sensing is off and the imbalance is not real. This is the
-single most useful physical measurement outstanding.
+**A multimeter across each group's taps still settles it definitively** if
+there's any remaining doubt — this was never run. If a future reading shows
+the split coming back, that would revive hypothesis 1 or 2.
 
 ---
 
