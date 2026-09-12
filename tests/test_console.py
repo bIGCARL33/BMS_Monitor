@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import tempfile
 
 from jkbms.console import Console
 from jkbms.frames import Frame
@@ -42,10 +43,14 @@ class FakeTransport:
             self.settings = bytes(raw)
 
 
-def make(transport, answers=("yes",), out=None):
+def make(transport, answers=("yes",), out=None, backup_dir=None):
+    # Default to a throwaway directory. Three tests originally forgot to
+    # override this and wrote real backup files into the repository, which
+    # then got committed. Defaulting here means forgetting is harmless.
     lines = out if out is not None else []
     replies = iter(answers)
     console = Console(transport, JK02_32S,
+                      backup_dir=backup_dir or tempfile.mkdtemp(prefix="jkbms-test-"),
                       out=lines.append,
                       confirm=lambda _p: next(replies, "no"))
     # Feed frames synchronously instead of starting the reader thread.
@@ -178,3 +183,16 @@ def test_settings_save_writes_a_restorable_file(tmp_path):
     assert target.exists()
     from jkbms.transports.replay import load_capture
     assert load_capture(target) == transport.settings
+
+
+def test_tests_never_write_backups_into_the_project(tmp_path, monkeypatch):
+    """A test that forgets to redirect backup_dir must not touch the repo."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    monkeypatch.chdir(tmp_path)          # even with a hostile cwd
+    transport = FakeTransport()
+    console, _ = make(transport)          # deliberately no backup_dir given
+    console.dispatch("set charge on")
+    assert transport.sent, "the write should still have happened"
+    assert not (repo / "settings-backups").exists(), \
+        "a test wrote backups into the project directory"

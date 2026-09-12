@@ -12,3 +12,6 @@ dist/
 captures/*.bin
 captures/*.hex
 *.csv
+
+# Settings backups are per-board operational data, never source.
+settings-backups/
