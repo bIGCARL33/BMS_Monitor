@@ -20,6 +20,7 @@ records the UART link produces, so everything downstream is shared.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Iterator
 
 from ..crc import sum8
@@ -39,7 +40,13 @@ _CMD_LEN = 20
 
 CMD_DEVICE_INFO = 0x97
 CMD_CELL_INFO = 0x96
-#: Asks the board to send its settings record (frame type 0x01).
+#: Nominally "asks the board to send its settings record" (frame type 0x01).
+#: On firmware 15.41 this is a no-op once the link is up: the board pushes
+#: exactly one settings frame, unprompted, immediately after connecting
+#: (alongside device info), and does not answer this command afterwards --
+#: confirmed by sending it four times over 32s on an open connection with
+#: zero replies. Getting a settings frame at any other point in the session
+#: requires disconnecting and reconnecting; see Console.fetch_settings().
 CMD_SETTINGS = 0x95
 
 #: Names JK boards advertise under. Matched case-insensitively as a prefix.
@@ -144,6 +151,14 @@ class BleTransport(Transport):
 
     The async Bleak client is driven from a private event loop so that callers
     get the same simple blocking iterator the serial transport provides.
+
+    That loop is not reentrant: ``console.py`` reads frames from a background
+    thread while the main thread calls ``request()``/``send_raw()`` to fetch
+    or write settings. Without serializing those, a call from one thread while
+    the other has ``run_until_complete`` in flight raises "This event loop is
+    already running" -- silently refusing every settings read and write.
+    ``_loop_lock`` is the fix; ``_closed`` lets the reader thread stop cleanly
+    instead of racing ``close()`` for a loop that is being torn down.
     """
 
     def __init__(self, address: str, *, connect_timeout_s: float = 20.0,
@@ -155,6 +170,8 @@ class BleTransport(Transport):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client = None
         self._queue: asyncio.Queue[bytes] | None = None
+        self._loop_lock = threading.Lock()
+        self._closed = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
     def open(self) -> None:
@@ -165,6 +182,7 @@ class BleTransport(Transport):
                 "bleak is not installed. Run: sudo apt install python3-bleak"
             ) from exc
 
+        self._closed.clear()
         self._loop = asyncio.new_event_loop()
         self._queue = asyncio.Queue()
 
@@ -201,8 +219,11 @@ class BleTransport(Transport):
         """
         if self._loop is None or self._client is None:
             raise TransportError("transport is not open")
-        self._loop.run_until_complete(self._client.write_gatt_char(
-            JK_CHAR_UUID, build_command(command, value), response=False))
+        with self._loop_lock:
+            if self._closed.is_set():
+                raise TransportError("transport is closed")
+            self._loop.run_until_complete(self._client.write_gatt_char(
+                JK_CHAR_UUID, build_command(command, value), response=False))
 
     def send_raw(self, frame: bytes) -> None:
         """Write a pre-built 20-byte command frame."""
@@ -210,8 +231,11 @@ class BleTransport(Transport):
             raise TransportError("transport is not open")
         if len(frame) != _CMD_LEN:
             raise TransportError(f"command frame must be {_CMD_LEN} bytes")
-        self._loop.run_until_complete(self._client.write_gatt_char(
-            JK_CHAR_UUID, frame, response=False))
+        with self._loop_lock:
+            if self._closed.is_set():
+                raise TransportError("transport is closed")
+            self._loop.run_until_complete(self._client.write_gatt_char(
+                JK_CHAR_UUID, frame, response=False))
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         assert self._queue is not None
@@ -223,13 +247,15 @@ class BleTransport(Transport):
             self._loop = None
 
     def close(self) -> None:
-        if self._client is not None and self._loop is not None:
-            try:
-                self._loop.run_until_complete(self._client.disconnect())
-            except Exception:  # pragma: no cover - best effort teardown
-                pass
-        self._client = None
-        self._shutdown_loop()
+        self._closed.set()
+        with self._loop_lock:
+            if self._client is not None and self._loop is not None:
+                try:
+                    self._loop.run_until_complete(self._client.disconnect())
+                except Exception:  # pragma: no cover - best effort teardown
+                    pass
+            self._client = None
+            self._shutdown_loop()
 
     # -- data --------------------------------------------------------------
     def raw_stream(self, *, timeout_s: float | None = None) -> Iterator[bytes]:
@@ -249,10 +275,15 @@ class BleTransport(Transport):
 
         deadline = None if timeout_s is None else loop.time() + timeout_s
         while deadline is None or loop.time() < deadline:
+            if self._closed.is_set():
+                return
             budget = self.poll_interval_s
             if deadline is not None:
                 budget = min(budget, max(0.01, deadline - loop.time()))
-            chunk = loop.run_until_complete(next_chunk(budget))
+            with self._loop_lock:
+                if self._closed.is_set():
+                    return
+                chunk = loop.run_until_complete(next_chunk(budget))
             if chunk:
                 yield chunk
 

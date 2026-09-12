@@ -24,6 +24,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+#: Firmware 15.41 pushes its settings frame exactly once, unprompted, right
+#: after a BLE connect -- an explicit re-request on an already-open link gets
+#: no reply (confirmed: 4 requests over 32s, 0 replies). The only way to get a
+#: fresh settings frame later in a session is to reconnect. This is the pause
+#: given the link to settle before reopening it -- shorter than start.sh's own
+#: post-disconnect delay only because there is no BlueZ-level cleanup to wait
+#: for here, just the peripheral itself.
+RECONNECT_SETTLE_S = 2.0
+
 from .control import (SWITCH_REGISTERS, THRESHOLD_REGISTERS, WriteError,
                       WritePlan, get_register)
 from .decode import decode
@@ -72,6 +81,10 @@ class Console:
         self._settings_raw = None
         self._settings_seen = threading.Event()
         self._stop = threading.Event()
+        #: Set while fetch_settings() is reconnecting to force a fresh
+        #: settings push. Tells the background reader that the exception
+        #: this causes is expected, not a dead link.
+        self._reconnecting = threading.Event()
         self._backed_up_this_session = False
         #: Verdict of the most recent write: True verified, False problem,
         #: None nothing attempted. Lets a non-interactive caller exit non-zero
@@ -81,20 +94,36 @@ class Console:
     # -- background reader -------------------------------------------------
     def start_reader(self) -> None:
         def pump():
-            try:
-                for frame in self.transport.frames():
+            while not self._stop.is_set():
+                try:
+                    for frame in self.transport.frames():
+                        if self._stop.is_set():
+                            return
+                        if frame.type_byte == SETTINGS_FRAME_TYPE:
+                            with self._lock:
+                                self._settings_raw = frame.raw
+                            self._settings_seen.set()
+                        elif frame.is_cell_info:
+                            with self._lock:
+                                self._latest = decode(frame, self.profile)
+                                self._latest_frame = frame
+                except Exception as exc:  # pragma: no cover - hardware dependent
                     if self._stop.is_set():
                         return
-                    if frame.type_byte == SETTINGS_FRAME_TYPE:
-                        with self._lock:
-                            self._settings_raw = frame.raw
-                        self._settings_seen.set()
-                    elif frame.is_cell_info:
-                        with self._lock:
-                            self._latest = decode(frame, self.profile)
-                            self._latest_frame = frame
-            except Exception as exc:  # pragma: no cover - hardware dependent
-                self.out(f"\n[reader stopped: {type(exc).__name__}: {exc}]")
+                    if not self._reconnecting.is_set():
+                        self.out(f"\n[reader stopped: {type(exc).__name__}: {exc}]")
+                        return
+                    # fetch_settings() is mid-reconnect and tore down the
+                    # transport out from under us -- that's the expected
+                    # cause of this exception. Poll rather than a single
+                    # wait(): the flag is already set for the duration of
+                    # the reconnect, so a wait() on it would return
+                    # immediately instead of pausing for it to clear.
+                    waited = 0.0
+                    while self._reconnecting.is_set() and waited < 60.0:
+                        time.sleep(0.25)
+                        waited += 0.25
+                    # loop back to the top and call frames() again, fresh
         threading.Thread(target=pump, daemon=True).start()
 
     def stop(self) -> None:
@@ -106,8 +135,17 @@ class Console:
             return self._latest
 
     # -- settings ----------------------------------------------------------
-    def fetch_settings(self, timeout_s: float = 8.0) -> bytes | None:
-        """Ask for a fresh settings frame and wait for it."""
+    def fetch_settings(self, timeout_s: float = 30.0) -> bytes | None:
+        """Ask for a fresh settings frame and wait for it.
+
+        On firmware that actually answers 0x95 on an open link, the live
+        request below is all this needs. Firmware 15.41 does not: confirmed
+        by sending 0x95 four times over 32s on one connection with zero
+        replies, while a fresh connect gets exactly one settings frame,
+        unprompted, every time. So when the live request times out, this
+        falls back to forcing that connect-time push by reconnecting --
+        see CMD_SETTINGS in transports/ble_link.py for how that was found.
+        """
         from .transports.ble_link import CMD_SETTINGS
 
         self._settings_seen.clear()
@@ -120,13 +158,65 @@ class Console:
         except Exception as exc:
             self.out(f"could not request settings: {exc}")
             return None
-        if not self._settings_seen.wait(timeout_s):
-            self.out("no settings frame arrived within "
-                     f"{timeout_s:.0f}s -- the board may not answer command "
-                     "0x95 on this firmware.")
-            return None
-        with self._lock:
-            return self._settings_raw
+
+        live_timeout = min(8.0, timeout_s)
+        if self._settings_seen.wait(live_timeout):
+            with self._lock:
+                return self._settings_raw
+
+        self.out(f"no reply to 0x95 within {live_timeout:.0f}s -- "
+                 "reconnecting to force this firmware's connect-time "
+                 "settings push instead.")
+        return self._fetch_settings_via_reconnect(timeout_s)
+
+    def _fetch_settings_via_reconnect(self, timeout_s: float) -> bytes | None:
+        """Force a fresh settings push by disconnecting and reconnecting.
+
+        Only entered after a live 0x95 request already timed out. Marks
+        ``_reconnecting`` so the background reader (mid-iteration on the
+        transport we are about to tear down) treats the resulting exception
+        as expected and waits, instead of reporting a dead link.
+        """
+        self._reconnecting.set()
+        try:
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+            time.sleep(RECONNECT_SETTLE_S)
+            try:
+                self.transport.open()
+            except Exception as exc:
+                self.out(f"reconnect failed: {exc}")
+                return None
+
+            self._settings_seen.clear()
+            try:
+                for frame in self.transport.frames(timeout_s=timeout_s):
+                    if frame.type_byte == SETTINGS_FRAME_TYPE:
+                        with self._lock:
+                            self._settings_raw = frame.raw
+                        self._settings_seen.set()
+                        break
+                    elif frame.is_cell_info:
+                        with self._lock:
+                            self._latest = decode(frame, self.profile)
+                            self._latest_frame = frame
+            except Exception as exc:
+                self.out(f"reconnected but reading it back failed: {exc}")
+                return None
+
+            if not self._settings_seen.is_set():
+                self.out(f"reconnected but no settings frame arrived within "
+                         f"{timeout_s:.0f}s either -- this firmware may not "
+                         "push one on every connect, or something else is "
+                         "wrong.")
+                return None
+            self.out("reconnected; got a fresh settings frame.")
+            with self._lock:
+                return self._settings_raw
+        finally:
+            self._reconnecting.clear()
 
     def save_settings(self, path: Path, raw: bytes) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,19 +228,26 @@ class Console:
         path.write_text(header + hexed + "\n")
         self.out(f"saved {len(raw)} bytes to {path}")
 
-    def ensure_backup(self) -> bool:
-        """Take a settings backup before the first write of the session."""
+    def ensure_backup(self) -> tuple[bool, bytes | None]:
+        """Take a settings backup before the first write of the session.
+
+        Returns ``(ok, raw)``. ``raw`` carries the settings frame this call
+        just fetched, so a caller that also needs an immediate "before"
+        snapshot for a read-back diff can reuse it instead of triggering a
+        second reconnect for data that has not had time to change; it is
+        ``None`` when the backup already happened earlier in the session.
+        """
         if self._backed_up_this_session:
-            return True
+            return True, None
         raw = self.fetch_settings()
         if raw is None:
             self.out("REFUSING TO WRITE: could not read the settings frame, so "
                      "no backup exists and no write could be verified.")
-            return False
+            return False, None
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.save_settings(self.backup_dir / f"settings-{stamp}.hex", raw)
         self._backed_up_this_session = True
-        return True
+        return True, raw
 
     # -- commands ----------------------------------------------------------
     def cmd_status(self, _args) -> None:
@@ -257,7 +354,8 @@ class Console:
             return
 
         self.last_write_ok = None
-        if not self.ensure_backup():
+        backup_ok, fresh_backup = self.ensure_backup()
+        if not backup_ok:
             self.last_write_ok = False
             return
 
@@ -272,7 +370,11 @@ class Console:
             self.last_write_ok = False
             return
 
-        before = self.fetch_settings()
+        # Reuse the backup's read if it was just taken this call -- nothing
+        # has changed since (we're still between backup and the write below),
+        # and each fetch on this firmware costs a reconnect. Only fetch again
+        # if the backup happened earlier in the session.
+        before = fresh_backup if fresh_backup is not None else self.fetch_settings()
         if before is None:
             self.out("could not read settings before the write; aborting")
             self.last_write_ok = False
