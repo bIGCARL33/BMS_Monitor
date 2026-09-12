@@ -28,6 +28,7 @@ from typing import Iterator, Sequence
 from .csvlog import CsvLogError, CsvLogger
 from .dashboard import ReadingBuffer, build_server
 from .console import run_console
+from .tui import run_tui
 from .decode import decode
 from .deviceinfo import decode_device_info
 from .discover import discover
@@ -199,6 +200,15 @@ def cmd_console(args: argparse.Namespace) -> int:
         if not frames:
             raise TransportError("no cell-info frame arrived; cannot start")
         profile, _ = _resolve_profile(args, frames)
+        # Board identity for the header, if it happens to arrive quickly.
+        device = None
+        try:
+            for frame in transport.frames(timeout_s=3.0):
+                if frame.type_byte == 0x03:
+                    device = decode_device_info(frame)
+                    break
+        except Exception:
+            pass
         result = verify(decode(frames[-1], profile), expect)
         print(f"# profile {profile.name} -- "
               + ("layout confirmed" if result.trustworthy
@@ -207,7 +217,16 @@ def cmd_console(args: argparse.Namespace) -> int:
             for check in result.failures:
                 print(f"#   {check.name}: {check.detail}")
             print("#   Run 'jkbms probe --discover' before changing anything.")
-        return run_console(transport, profile, backup_dir=args.backup_dir)
+        if args.plain or not sys.stdout.isatty():
+            return run_console(transport, profile, backup_dir=args.backup_dir)
+        try:
+            return run_tui(transport, profile, backup_dir=args.backup_dir,
+                           device=device)
+        except Exception as exc:
+            # A terminal that cannot do curses should not cost you the session.
+            print(f"# full-screen UI unavailable ({exc}); falling back to the "
+                  f"plain console", file=sys.stderr)
+            return run_console(transport, profile, backup_dir=args.backup_dir)
 
 
 def cmd_settings(args: argparse.Namespace) -> int:
@@ -645,6 +664,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds to wait for the first frame")
     p.add_argument("--backup-dir", default="settings-backups",
                    help="where settings backups are written before any write")
+    p.add_argument("--plain", action="store_true",
+                   help="line-by-line console instead of the full-screen UI")
     p.set_defaults(func=cmd_console)
 
     p = sub.add_parser("settings",

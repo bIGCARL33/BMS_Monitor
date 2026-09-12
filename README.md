@@ -137,13 +137,26 @@ Useful for working on offsets, CSV columns or tests with the pack disconnected.
 | `loopback` | Prove the USB adapter works, with the BMS disconnected |
 | `doctor` | Check this machine can talk to the BMS at all |
 | `settings` | Read/export the settings frame — the config export JK doesn't provide |
-| `console` | Interactive monitor **and control** session |
+| `console` | Full-screen monitor **and control** in one terminal |
 
 ## Changing settings
 
-`jkbms console` opens one BLE link and gives you a prompt: `status`, `cells`,
-`switches`, `settings`, and `set NAME VALUE` for the charge/discharge MOSFETs,
-the balancer, and protection thresholds.
+```bash
+jkbms console --ble <address>
+```
+
+A full-screen terminal UI: live pack readout at the top, command prompt at the
+bottom, no browser and no second machine. Cell voltages are drawn as deviation
+from the pack mean for the same reason the web dashboard does it — four groups
+within a millivolt make four identical full-length bars, which is worse than no
+chart.
+
+Commands: `status`, `cells`, `switches`, `settings`, `settings save FILE`,
+`settings diff FILE`, and `set NAME VALUE` for the charge/discharge MOSFETs,
+the balancer, and protection thresholds. Up/down recalls history.
+
+`--plain` gives the line-by-line version instead, and it falls back there
+automatically if the terminal cannot do curses or output is redirected.
 
 Writing to a BMS is not like reading from one. A wrong read offset gives a
 wrong number; a wrong write changes how a lithium pack protects itself, and
