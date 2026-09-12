@@ -38,9 +38,24 @@ def test_write_frame_is_a_valid_20_byte_command():
 
 
 def test_write_frame_uses_the_same_envelope_as_reads():
-    """Reads are confirmed working on hardware, so reuse is the safe choice."""
+    """Reads are confirmed working on hardware, so reuse is the safe choice.
+
+    Reads always send a byte-5 length of 0 (they carry no value); pass that
+    explicitly here since a real write's default length differs -- see
+    test_write_frame_carries_the_value_length_in_byte_5.
+    """
     from jkbms.transports.ble_link import build_command
-    assert build_write_command(0x96, 0) == build_command(0x96, 0)
+    assert build_write_command(0x96, 0, length=0) == build_command(0x96, 0)
+
+
+def test_write_frame_carries_the_value_length_in_byte_5():
+    """Cross-checked against syssi/esphome-jk-bms's build_frame(): byte 5 is
+    the byte-width of the value, 4 for every 32-bit register this project
+    writes. The original code always sent 0 here, even for real writes --
+    a candidate reason every switch write was silently ignored on 15.41.
+    """
+    frame = build_write_command(0x1F, 1)
+    assert frame[5] == 4
 
 
 def test_oversized_value_is_refused():
@@ -85,8 +100,8 @@ def test_unknown_setting_name_lists_the_known_ones():
 # ---------------------------------------------------------------- verification
 def test_verified_when_exactly_the_intended_word_changes():
     plan = WritePlan(get_register("charge"), 1)
-    before = settings_frame(**{"122": 0})
-    after = settings_frame(**{"122": 1})
+    before = settings_frame(**{"118": 0})
+    after = settings_frame(**{"118": 1})
     ok, message = plan.check_result(before, after)
     assert ok, message
     assert "exactly as intended" in message
@@ -95,7 +110,7 @@ def test_verified_when_exactly_the_intended_word_changes():
 def test_flagged_when_nothing_changed():
     """The likeliest failure: the register number is wrong for this firmware."""
     plan = WritePlan(get_register("charge"), 1)
-    frame = settings_frame(**{"122": 0})
+    frame = settings_frame(**{"118": 0})
     ok, message = plan.check_result(frame, frame)
     assert not ok
     assert "NOT APPLIED" in message
@@ -105,8 +120,8 @@ def test_flagged_when_nothing_changed():
 def test_flagged_when_some_other_field_moved():
     """A wrong register that lands elsewhere must be caught immediately."""
     plan = WritePlan(get_register("charge"), 1)
-    before = settings_frame(**{"122": 0, "18": 4200})
-    after = settings_frame(**{"122": 0, "18": 1})     # OVP clobbered instead
+    before = settings_frame(**{"118": 0, "18": 4200})
+    after = settings_frame(**{"118": 0, "18": 1})     # OVP clobbered instead
     ok, message = plan.check_result(before, after)
     assert not ok
     assert "UNEXPECTED CHANGE" in message
@@ -115,8 +130,8 @@ def test_flagged_when_some_other_field_moved():
 
 def test_flagged_when_the_right_field_takes_the_wrong_value():
     plan = WritePlan(get_register("charge"), 1)
-    before = settings_frame(**{"122": 0})
-    after = settings_frame(**{"122": 7})
+    before = settings_frame(**{"118": 0})
+    after = settings_frame(**{"118": 7})
     ok, message = plan.check_result(before, after)
     assert not ok
     assert "APPLIED BUT WRONG" in message

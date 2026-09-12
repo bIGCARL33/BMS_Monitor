@@ -93,13 +93,13 @@ class Register:
 SWITCH_REGISTERS = (
     Register("charge", 0x1D,
              "charge MOSFET -- allows current INTO the pack",
-             verify_offset=122),
+             verify_offset=118),
     Register("discharge", 0x1E,
              "discharge MOSFET -- allows current OUT of the pack",
-             verify_offset=126),
+             verify_offset=122),
     Register("balancer", 0x1F,
              "cell balancer (0.4 A passive)",
-             verify_offset=130),
+             verify_offset=126),
 )
 
 #  Protection thresholds. A wrong value here means the pack fails to disconnect
@@ -124,11 +124,18 @@ def get_register(name: str) -> Register:
         raise WriteError(f"unknown setting {name!r}. Known: {known}") from None
 
 
-def build_write_command(code: int, value: int) -> bytes:
+def build_write_command(code: int, value: int, length: int = 4) -> bytes:
     """Build the 20-byte write frame.
 
-    Same envelope as the read commands, which are confirmed working against the
-    board -- only the command byte and payload differ.
+    Same envelope as the read commands, which are confirmed working against
+    the board -- but byte 5 is not the fixed 0x00 the read commands use.
+    Cross-checked against syssi/esphome-jk-bms's build_frame(), which sends
+    byte 5 as the byte-width of the value being written (4 for every 32-bit
+    register this project writes, 0 only for the argument-less read
+    commands). This project originally always sent 0 here even for writes --
+    every switch write before this fix went out with a byte 5 no real client
+    of this protocol ever sends, which is one candidate explanation for why
+    every one of them was silently ignored on firmware 15.41.
     """
     if not 0 <= code <= 0xFF:
         raise WriteError(f"command byte {code} out of range")
@@ -137,7 +144,7 @@ def build_write_command(code: int, value: int) -> bytes:
     body = bytearray(_CMD_LEN - 1)
     body[0:4] = _CMD_HEADER
     body[4] = code
-    body[5] = 0x00
+    body[5] = length
     body[6:10] = value.to_bytes(4, "little")
     return bytes(body) + bytes((sum8(body),))
 

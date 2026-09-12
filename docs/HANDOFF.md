@@ -43,27 +43,83 @@ against the installed major version; `tests/test_ble_api.py` guards it.
 
 ## What is NOT verified — read before writing
 
-**The write register numbers.** `jkbms/control.py` maps `charge` → `0x1D`,
-`discharge` → `0x1E`, `balancer` → `0x1F`, and the two thresholds. These come
-from community reverse-engineering and have **never been tested on firmware
-15.41**. The 20-byte frame envelope *is* confirmed — it is the same one the
-working reads use — but the register numbers are hypotheses.
+**Writes do not work from this tool yet, and it is not a register-number
+problem.** Session of 2026-09-12 settled this conclusively:
 
-This is why every write takes a settings backup first, then re-reads and diffs
-to prove exactly the intended word changed. The diff distinguishes:
+* The settings-frame *layout* for offsets 6–138 is now strongly corroborated
+  against `syssi/esphome-jk-bms`'s `decode_jk02_settings_` (a maintained,
+  widely-deployed open-source implementation of this same JK02 protocol) —
+  every field from offset 6 to 74 matches name-for-name, and two of ours were
+  wrong and got corrected: `charge`/`discharge`/`balancer` switches are at
+  offsets 118/122/126 (not 122/126/130 — offset 130 is nominal battery
+  capacity, confirmed by our own dump reading a plausible 40.000 Ah there,
+  not a boolean).
+* The write frame was missing its length byte (byte 5): every real write
+  needs it set to the value's byte width (4, for every register here), not
+  the 0 that only bare read commands use. Fixed in `build_write_command`,
+  cross-checked against the same reference project's `build_frame()`.
+* **Neither fix made a write actually take effect.** A benign, non-protection
+  register (`0x20`, nominal capacity — chosen specifically because getting it
+  wrong has zero safety impact) was written with the corrected frame, byte-
+  perfect against a real device's captured traffic, and the board still
+  silently ignored it. This ruled out "wrong register" and "board refuses
+  writes while a fault is active" (tested after clearing an unrelated fault,
+  see below) as explanations.
+* **The actual cause: a BLE traffic capture from JK's own Android app
+  (branded "EnjPower" for this board) shows its write frames carry ~9 extra
+  non-zero bytes between the value and the checksum that this tool always
+  sends as zero.** Confirmed by direct comparison: identical register,
+  identical value, identical checksum scheme (plain sum8, verified correct
+  byte-for-byte) — the only difference is those bytes, and only the app's
+  write actually changed the setting. This is almost certainly some form of
+  per-write authentication tied to the parameter password. The app's protocol
+  logic is not in its Java layer (which is a thin `BluetoothGatt` wrapper) —
+  it's compiled into native Qt/C++ libraries (`libenjpower_arm64-v8a.so`,
+  `libprotocore.so`), likely driven by a data file rather than hardcoded
+  constants (the native lib exports a generic `EProtoMatch`/`EProtoProto`
+  protocol-description engine plus AES/file-decrypt routines, not per-device
+  register tables). Finding the exact algorithm needs disassembling that
+  native code or locating and decrypting whatever config it reads — not
+  attempted; a real chunk of work with no guaranteed payoff.
+* Until that auth mechanism is replicated, **every write from this tool will
+  be silently ignored, and the code correctly reports this** (`NOT APPLIED:
+  no settings changed`) rather than claiming success. Nothing has ever been
+  altered on the pack by this tool's writes.
 
-* *nothing changed* → register wrong for this firmware, **nothing was altered**
-* *wrong field changed* → restore from backup, do not repeat
-* *right field, wrong value* → reported as such
+The write-side rules (backup before first write, read-back diff, refuse
+anything without a known offset) all still apply and are exactly what caught
+this — do not weaken them because writes don't work yet; the day they start
+working is the day a silent wrong-register write becomes possible again.
 
 **The current field.** Every reading so far has been `0.000 A`, so its scale
 and sign have never been exercised. Do not trust any capacity or energy figure
 until a known load has confirmed that discharge reads **negative**.
 
-**The settings-frame layout.** Far weaker evidence than the cell-info map.
-`jkbms settings` deliberately leads with a word-by-word dump rather than a
-decode, so offsets can be pinned by recognising values the operator already
-knows.
+---
+
+## A real fault, found and fixed: cell count 8 vs. actual 4 (2026-09-12)
+
+While chasing the write problem above, the JK app's own alarm surfaced a
+genuine, unrelated safety issue: **"Cell quantity abnormal."** The BMS was
+configured for 8 series cells; this pack is 4S4P (4 series groups) — matching
+both `docs/HANDOFF.md`'s own pack description and offset 114 in our settings
+dump, which read `8`. With the fault active, `Chg`/`Dsg`/`Bal` all read OFF in
+the app (all three had read ON minutes earlier via this tool, before the fault
+tripped) — a live protection fault, not a communication error, and *also* a
+strong candidate explanation for why even a harmless write was refused: a
+faulted BMS refusing configuration changes is normal, sensible behavior,
+though writes still failed identically after this was fixed (see above).
+
+**Fixed via the app** (this tool cannot write settings yet): cell count
+corrected from 8 to 4. Alarm cleared, all three switches returned to ON
+immediately. The parameter password was also changed from its factory default
+to something private during this session.
+
+Worth re-checking whether this misconfiguration is connected to the 31 mV
+group-imbalance question below — the prior two readings in that table were
+both taken while the pack may have been running with this same wrong cell
+count. Treat that table as pre-fix data; a fresh baseline post-fix would be
+more trustworthy than extending the old series.
 
 ---
 
@@ -101,22 +157,25 @@ single most useful physical measurement outstanding.
 
 ## Next steps, in order
 
-1. **`./start.sh`** — clears anything holding the single BLE connection, runs
-   `doctor`, confirms the board is advertising, opens the console.
-2. **`settings save baseline.hex`** — the config export JK's software does not
-   provide, and the only rollback that will exist.
-3. **`settings`** — the word dump. Match values you know (cell count, any
-   threshold) to pin the settings offsets from evidence.
-4. **`set balancer on`** — the first write. The balancer is the right one to
-   start with: it changes no threshold, it is what the 31 mV split needs, and
-   flipping it back restores the previous state exactly. **Report exactly what
-   the read-back verification says** — that result is what confirms or refutes
-   register `0x1F` on this firmware.
-5. **Multimeter cross-check** — per the table above, and the current sign
-   under a known load.
-6. **Log continuously** — `./start.sh --dashboard`, or install the systemd
-   unit (`deploy/install-service.sh`). A single snapshot cannot distinguish
-   drift from a step change; the imbalance question needs a time series.
+`./start.sh` → `settings save` → `settings` → `set balancer on` (the original
+plan here) has already been run this session — see "What is NOT verified"
+above for exactly what happened: the console-side bugs blocking it are fixed,
+but the write itself is confirmed not to work yet, for reasons unrelated to
+which register number is used. Re-running that sequence will reproduce the
+same `NOT APPLIED` result until the auth mechanism is solved. What's actually
+next:
+
+1. **Decide on the write-auth reverse-engineering.** Either commit real time
+   to disassembling `libenjpower_arm64-v8a.so` / `libprotocore.so`, or accept
+   read-only + app-driven writes for now. Not a quick follow-up — see above.
+2. **Multimeter cross-check** — per the table below, and the current sign
+   under a known load. Unaffected by the write question and still the single
+   most useful physical measurement outstanding.
+3. **Log continuously, now that the cell-count fault is fixed** —
+   `./start.sh --dashboard`, or install the systemd unit
+   (`deploy/install-service.sh`). The prior imbalance readings were taken
+   while the pack may have been misconfigured; a fresh time series is worth
+   more than extending the old one.
 
 ---
 
@@ -137,10 +196,14 @@ single most useful physical measurement outstanding.
 
 ## Repository
 
-Branch `claude/jk-bms-laptop-monitoring-oo2fdt`. 224 tests, none needing
-hardware: `python3 -m pytest tests/ -q`.
+Branch `claude/jk-bms-laptop-monitoring-oo2fdt`, pushed to
+`https://github.com/bIGCARL33/BMS_Monitor` as of 2026-09-12. 224+ tests, none
+needing hardware: `python3 -m pytest tests/ -q`. Note the repo is **public**,
+and the BLE address, BMS serial, and committed test fixture are public with
+it.
 
-`https://github.com/bIGCARL33/BMS_Monitor` is empty — pushing from a machine
-with the operator's own credentials is the way to fill it. Note the repo is
-**public**, and the BLE address, BMS serial, and committed test fixture would
-become public with it.
+A decompiled copy of the EnjPower Android app (`enjpower-bms-*.apk`, used to
+find the write-frame bytes above) is **not** part of this repo and should
+stay out of it — it's the vendor's compiled software, not something to
+redistribute. Any findings extracted from it belong here as prose/hex, not as
+copied binaries or decompiled source.

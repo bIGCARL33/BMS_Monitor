@@ -19,7 +19,7 @@ class FakeTransport:
     """Enough of a transport to drive the console without hardware."""
 
     def __init__(self, settings=None, accept_writes=True, applies=True):
-        self.settings = settings or settings_frame(**{"122": 0, "126": 1, "130": 0})
+        self.settings = settings or settings_frame(**{"118": 0, "122": 1, "126": 0})
         self.sent = []
         self.accept_writes = accept_writes
         self.applies = applies
@@ -38,7 +38,7 @@ class FakeTransport:
         self.sent.append(frame)
         if self.applies:
             raw = bytearray(self.settings)
-            struct.pack_into("<I", raw, 122, 1)      # charge switch -> on
+            struct.pack_into("<I", raw, 118, 1)      # charge switch -> on
             raw[-1] = sum(raw[:-1]) & 0xFF
             self.settings = bytes(raw)
 

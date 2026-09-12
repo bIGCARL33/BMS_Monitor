@@ -225,8 +225,17 @@ class BleTransport(Transport):
             self._loop.run_until_complete(self._client.write_gatt_char(
                 JK_CHAR_UUID, build_command(command, value), response=False))
 
-    def send_raw(self, frame: bytes) -> None:
-        """Write a pre-built 20-byte command frame."""
+    def send_raw(self, frame: bytes, *, response: bool = False) -> None:
+        """Write a pre-built 20-byte command frame.
+
+        ``response`` requests a GATT write-with-response instead of the
+        write-without-response every read command on this link uses.
+        Default is False to keep existing behaviour; True is for diagnosing
+        a settings write that a device accepts silently but never applies
+        (write-without-response gives no delivery confirmation at all, so
+        that failure mode is indistinguishable from a rejected register
+        without trying this).
+        """
         if self._loop is None or self._client is None:
             raise TransportError("transport is not open")
         if len(frame) != _CMD_LEN:
@@ -235,7 +244,7 @@ class BleTransport(Transport):
             if self._closed.is_set():
                 raise TransportError("transport is closed")
             self._loop.run_until_complete(self._client.write_gatt_char(
-                JK_CHAR_UUID, frame, response=False))
+                JK_CHAR_UUID, frame, response=response))
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         assert self._queue is not None

@@ -34,11 +34,16 @@ __all__ = [
 
 SETTINGS_FRAME_TYPE = 0x01
 
-#: Candidate field names by byte offset, from community reverse-engineering.
-#: NOT verified on this firmware -- shown as guesses next to the raw values so
-#: they can be confirmed or rejected against a board whose configuration the
-#: operator already knows. Anything acted on must be confirmed by a read-back
-#: diff, never by this table alone.
+#: Candidate field names by byte offset. Offsets 6-138 line up field-by-field
+#: (name, scale and unit) against syssi/esphome-jk-bms's decode_jk02_settings_
+#: -- a maintained, widely-deployed implementation of this same JK02 protocol
+#: -- cross-checked against this board's own dump: offset 78 there reads 400
+#: raw (0.400 A), matching that project's "max balance current" field and this
+#: project's own "0.4 A passive" balancer description in control.py; offset
+#: 130 reads 40000 raw (40.000 Ah), which fits "nominal battery capacity" and
+#: not a 0/1 switch. That is corroboration for THIS board, not confirmation on
+#: this firmware -- still shown as guesses, and still only acted on via a
+#: read-back diff.
 CANDIDATE_FIELDS = {
     6: "smart sleep voltage?",
     10: "cell UVP?",
@@ -57,12 +62,23 @@ CANDIDATE_FIELDS = {
     62: "max discharge current?",
     66: "discharge OCP delay?",
     70: "discharge OCP recovery?",
-    74: "short-circuit protect delay?",
-    78: "balance starting voltage?",
-    118: "cell count?",
-    122: "charge switch?",
-    126: "discharge switch?",
-    130: "balancer switch?",
+    74: "short-circuit protection recovery time?",
+    78: "max balance current? (spec: 0.4 A)",
+    82: "charge OTP?",
+    86: "charge OTP recovery?",
+    90: "discharge OTP?",
+    94: "discharge OTP recovery?",
+    98: "charge UTP?",
+    102: "charge UTP recovery?",
+    106: "MOSFET OTP?",
+    110: "MOSFET OTP recovery?",
+    114: "cell count?",
+    118: "charge switch?",
+    122: "discharge switch?",
+    126: "balancer switch?",
+    130: "nominal battery capacity?",
+    134: "short-circuit protection delay?",
+    138: "start balance voltage?",
 }
 
 
