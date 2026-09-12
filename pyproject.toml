@@ -19,6 +19,8 @@ dependencies = []
 
 [project.optional-dependencies]
 serial = ["pyserial>=3.5"]
+# Verified against bleak 3.0.2 on aarch64; tests/test_ble_api.py
+# guards the API surface we use.
 ble = ["bleak>=0.21"]
 all = ["pyserial>=3.5", "bleak>=0.21"]
 dev = ["pytest>=7.4", "vermin>=1.6"]
