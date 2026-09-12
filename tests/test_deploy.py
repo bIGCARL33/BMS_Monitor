@@ -134,3 +134,36 @@ def test_systemd_accepts_the_unit(tmp_path):
     # Unknown-key warnings are the class of bug this exists to catch.
     assert "Unknown key" not in combined, combined
     assert "Failed to parse" not in combined, combined
+
+
+# ------------------------------------------------- start.sh
+START = DEPLOY.parent / "start.sh"
+
+
+def test_start_script_is_valid_bash():
+    assert START.exists()
+    r = subprocess.run(["bash", "-n", str(START)], capture_output=True)
+    assert r.returncode == 0, r.stderr.decode()
+
+
+def test_start_script_never_pkills_by_pattern():
+    """pkill -f can match this script's own ancestors and kill the session."""
+    text = START.read_text()
+    code = "\n".join(l.split("#", 1)[0] for l in text.splitlines())
+    assert "pkill" not in code, (
+        "start.sh must not pkill by pattern; it filters its own ancestors out "
+        "of a pgrep list instead")
+
+
+def test_start_script_excludes_its_own_ancestors():
+    text = START.read_text()
+    assert "ancestors()" in text
+    assert "grep -qx" in text
+
+
+def test_start_script_only_removes_git_tracked_backups():
+    """A user's real settings backups must never be deleted."""
+    text = START.read_text()
+    assert "git ls-files --error-unmatch" in text, (
+        "the cleanup must be conditional on the files being git-tracked test "
+        "artifacts, not any backup the user has saved")
