@@ -138,6 +138,7 @@ Useful for working on offsets, CSV columns or tests with the pack disconnected.
 | `doctor` | Check this machine can talk to the BMS at all |
 | `settings` | Read/export the settings frame — the config export JK doesn't provide |
 | `console` | Full-screen monitor **and control** in one terminal |
+| `set` | Change one setting non-interactively (scriptable) |
 
 ## Changing settings
 
@@ -157,6 +158,21 @@ the balancer, and protection thresholds. Up/down recalls history.
 
 `--plain` gives the line-by-line version instead, and it falls back there
 automatically if the terminal cannot do curses or output is redirected.
+
+### Scripting a change
+
+A full-screen UI is for a human at a keyboard. For a script — or an agent —
+there is a one-shot form:
+
+```bash
+jkbms set --ble <address> balancer on --yes
+echo $?      # 0 verified, non-zero refused or unverified
+```
+
+`--yes` skips the prompt. It does **not** skip the settings backup or the
+read-back verification, and the command refuses outright if the cell-info
+layout is not confirmed on that board — writing to a link you do not yet
+understand is the one thing never worth automating.
 
 Writing to a BMS is not like reading from one. A wrong read offset gives a
 wrong number; a wrong write changes how a lithium pack protects itself, and

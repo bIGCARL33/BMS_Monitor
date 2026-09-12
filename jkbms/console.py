@@ -73,6 +73,10 @@ class Console:
         self._settings_seen = threading.Event()
         self._stop = threading.Event()
         self._backed_up_this_session = False
+        #: Verdict of the most recent write: True verified, False problem,
+        #: None nothing attempted. Lets a non-interactive caller exit non-zero
+        #: on an unverified write instead of parsing the text.
+        self.last_write_ok = None
 
     # -- background reader -------------------------------------------------
     def start_reader(self) -> None:
@@ -252,7 +256,9 @@ class Console:
             self.out(str(exc))
             return
 
+        self.last_write_ok = None
         if not self.ensure_backup():
+            self.last_write_ok = False
             return
 
         self.out("\nAbout to write:")
@@ -263,21 +269,25 @@ class Console:
         answer = self.confirm("\nProceed? type 'yes' to send: ")
         if answer.strip().lower() != "yes":
             self.out("cancelled, nothing sent")
+            self.last_write_ok = False
             return
 
         before = self.fetch_settings()
         if before is None:
             self.out("could not read settings before the write; aborting")
+            self.last_write_ok = False
             return
 
         send = getattr(self.transport, "send_raw", None)
         if send is None:
             self.out("this transport cannot send commands")
+            self.last_write_ok = False
             return
         try:
             send(plan.command())
         except Exception as exc:
             self.out(f"send failed: {exc}")
+            self.last_write_ok = False
             return
         self.out("sent; re-reading settings to verify...")
         time.sleep(1.0)
@@ -286,8 +296,10 @@ class Console:
         if after is None:
             self.out("WROTE BUT COULD NOT VERIFY -- re-read failed. Check "
                      "'switches' manually before trusting the state.")
+            self.last_write_ok = False
             return
         ok, message = plan.check_result(before, after)
+        self.last_write_ok = ok
         self.out(("OK: " if ok else "PROBLEM: ") + message)
 
     def cmd_watch(self, args) -> None:

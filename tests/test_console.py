@@ -196,3 +196,35 @@ def test_tests_never_write_backups_into_the_project(tmp_path, monkeypatch):
     assert transport.sent, "the write should still have happened"
     assert not (repo / "settings-backups").exists(), \
         "a test wrote backups into the project directory"
+
+
+# ------------------------------------------------- non-interactive verdict
+def test_last_write_ok_records_a_verified_write():
+    """A script needs the verdict as an exit code, not as text to parse."""
+    transport = FakeTransport()
+    console, _ = make(transport, answers=("yes",))
+    assert console.last_write_ok is None
+    console.dispatch("set charge on")
+    assert console.last_write_ok is True
+
+
+def test_last_write_ok_records_a_failed_write():
+    transport = FakeTransport(applies=False)
+    console, _ = make(transport, answers=("yes",))
+    console.dispatch("set charge on")
+    assert console.last_write_ok is False
+
+
+def test_last_write_ok_records_a_cancelled_write():
+    transport = FakeTransport()
+    console, _ = make(transport, answers=("no",))
+    console.dispatch("set charge on")
+    assert console.last_write_ok is False, "a cancelled write must not exit 0"
+
+
+def test_last_write_ok_records_a_refused_write(tmp_path):
+    transport = FakeTransport()
+    console, _ = make(transport, answers=("yes",), backup_dir=tmp_path)
+    console.fetch_settings = lambda timeout_s=8.0: None
+    console.dispatch("set charge on")
+    assert console.last_write_ok is False

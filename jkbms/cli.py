@@ -273,6 +273,47 @@ def cmd_settings(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set(args: argparse.Namespace) -> int:
+    """Change one setting without an interactive session.
+
+    Same backup / confirm / verify path as the console -- this only removes the
+    full-screen UI, so the change is scriptable and can be driven by an agent
+    or a cron job. ``--yes`` skips the prompt; it does not skip the backup or
+    the read-back verification, which are what make a write to a battery
+    protection device defensible.
+    """
+    from .console import Console
+
+    transport = _open_transport(args)
+    expect = _expectation(args)
+    with transport:
+        frames = []
+        for frame in transport.cell_info_frames(limit=1, timeout_s=args.timeout):
+            frames.append(frame)
+        if not frames:
+            raise TransportError("no cell-info frame arrived; refusing to write "
+                                 "to a board we cannot read")
+        profile, _ = _resolve_profile(args, frames)
+        result = verify(decode(frames[-1], profile), expect)
+        if not result.trustworthy:
+            print("REFUSING: the cell-info layout is not confirmed on this "
+                  "board, so the link is not understood well enough to write "
+                  "to it. Run 'jkbms probe --discover' first.", file=sys.stderr)
+            for check in result.failures:
+                print(f"  {check.name}: {check.detail}", file=sys.stderr)
+            return 2
+
+        answers = iter(["yes"]) if args.yes else None
+        console = Console(
+            transport, profile, backup_dir=args.backup_dir,
+            confirm=(lambda _p: next(answers, "no")) if args.yes else input)
+        console.start_reader()
+        console.dispatch(f"set {args.name} {args.value}")
+        # dispatch reports through console.out (print); the exit code carries
+        # the verdict so a script can branch on it.
+        return 0 if console.last_write_ok else 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Check the environment and print the fix for anything broken.
 
@@ -676,6 +717,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", default=None, help="save the raw frame here")
     p.add_argument("--all", action="store_true", help="include zero words")
     p.set_defaults(func=cmd_settings)
+
+    p = sub.add_parser("set",
+                       help="change one setting non-interactively (scriptable)")
+    _add_link_args(p)
+    _add_pack_args(p)
+    p.add_argument("name", help="charge | discharge | balancer | cell_ovp | cell_uvp")
+    p.add_argument("value", help="on/off for switches, volts for thresholds")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="skip the prompt; the backup and read-back verification "
+                        "still happen")
+    p.add_argument("--timeout", type=float, default=30.0, help="seconds to wait")
+    p.add_argument("--backup-dir", default="settings-backups",
+                   help="where the pre-write backup goes")
+    p.set_defaults(func=cmd_set)
 
     p = sub.add_parser("doctor",
                        help="check this machine can talk to the BMS at all")
